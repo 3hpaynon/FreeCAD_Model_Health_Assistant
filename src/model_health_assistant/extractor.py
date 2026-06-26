@@ -1,0 +1,249 @@
+"""Best-effort FreeCAD document extraction.
+
+This module is safe to import outside FreeCAD. When FreeCAD is unavailable,
+``get_active_document`` returns ``None`` and the other functions can still be
+used with simple fake objects in tests or examples.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from model_health_assistant.models import FeatureInfo
+
+try:  # pragma: no cover - exercised only inside FreeCAD.
+    import FreeCAD as App  # type: ignore
+except Exception:  # pragma: no cover - expected in normal unit tests.
+    App = None
+
+
+def get_active_document() -> Any | None:
+    """Return the active FreeCAD document when FreeCAD is available."""
+
+    if App is None:
+        return None
+    return getattr(App, "ActiveDocument", None)
+
+
+def extract_document_features(doc: Any | None) -> list[FeatureInfo]:
+    """Extract basic feature information from a FreeCAD-like document."""
+
+    if doc is None:
+        return []
+
+    objects = getattr(doc, "Objects", None) or []
+    return [extract_feature_info(obj) for obj in objects]
+
+
+def extract_feature_info(obj: Any) -> FeatureInfo:
+    """Extract a defensive, JSON-friendly summary from a FreeCAD object."""
+
+    name = _object_name(obj)
+    label = str(getattr(obj, "Label", "") or name)
+    type_id = str(getattr(obj, "TypeId", "") or "")
+    is_sketch = is_sketch_object(obj)
+    support = extract_sketch_support(obj) if is_sketch else {}
+
+    metadata: dict[str, Any] = {}
+    if is_sketch:
+        _add_count_if_available(metadata, "geometry_count", getattr(obj, "Geometry", None))
+        _add_count_if_available(metadata, "constraint_count", getattr(obj, "Constraints", None))
+        constraint_status = getattr(obj, "ConstraintStatus", None)
+        if constraint_status is not None:
+            metadata["constraint_status"] = str(constraint_status)
+
+    return FeatureInfo(
+        internal_name=name,
+        label=label,
+        type_id=type_id,
+        dependency_names=extract_dependencies(obj),
+        downstream_dependent_names=extract_downstream_dependents(obj),
+        is_sketch=is_sketch,
+        attached_to_generated_geometry=bool(support.get("attached_to_generated_geometry", False)),
+        support_name=support.get("support_name"),
+        support_kind=support.get("support_kind"),
+        recompute_status=_extract_recompute_status(obj),
+        error_status=_extract_error_status(obj),
+        notes=list(support.get("notes", [])),
+        metadata=metadata,
+    )
+
+
+def extract_dependencies(obj: Any) -> list[str]:
+    """Return names of objects this object depends on.
+
+    FreeCAD commonly exposes these through ``OutList``. The helper also supports
+    simple fake objects used in tests.
+    """
+
+    out_list = getattr(obj, "OutList", None)
+    if out_list is None and hasattr(obj, "getOutList"):
+        try:
+            out_list = obj.getOutList()
+        except Exception:
+            out_list = []
+    return _names_from_objects(out_list or [])
+
+
+def extract_downstream_dependents(obj: Any) -> list[str]:
+    """Return names of objects that depend on this object."""
+
+    in_list = getattr(obj, "InList", None)
+    if in_list is None and hasattr(obj, "getInList"):
+        try:
+            in_list = obj.getInList()
+        except Exception:
+            in_list = []
+    return _names_from_objects(in_list or [])
+
+
+def is_sketch_object(obj: Any) -> bool:
+    """Return ``True`` when an object appears to be a FreeCAD sketch."""
+
+    type_id = str(getattr(obj, "TypeId", "") or "").lower()
+    class_name = obj.__class__.__name__.lower()
+    return "sketcher::sketchobject" in type_id or class_name.endswith("sketchobject")
+
+
+def extract_sketch_support(obj: Any) -> dict[str, Any]:
+    """Extract support information for a sketch-like object.
+
+    FreeCAD sketch support data can vary by version and modeling context. This
+    function intentionally classifies support conservatively.
+    """
+
+    raw_support = getattr(obj, "Support", None)
+    support_obj, sub_elements = _normalize_support(raw_support)
+
+    if support_obj is None:
+        return {
+            "support_name": None,
+            "support_kind": "unknown",
+            "attached_to_generated_geometry": False,
+            "notes": ["Sketch support information was not available."],
+        }
+
+    support_name = _object_name(support_obj)
+    support_kind = _classify_support(support_obj, sub_elements)
+    attached_to_generated_geometry = support_kind in {"generated_geometry", "generated_feature"}
+
+    return {
+        "support_name": support_name,
+        "support_kind": support_kind,
+        "attached_to_generated_geometry": attached_to_generated_geometry,
+        "notes": [],
+    }
+
+
+def build_model_snapshot(doc: Any | None) -> list[FeatureInfo]:
+    """Build the Version 0.1 model snapshot used by the risk engine."""
+
+    return extract_document_features(doc)
+
+
+def _object_name(obj: Any) -> str:
+    name = getattr(obj, "Name", None) or getattr(obj, "Label", None) or ""
+    return str(name)
+
+
+def _names_from_objects(objects: Any) -> list[str]:
+    if hasattr(objects, "Name") or hasattr(objects, "Label"):
+        return [_object_name(objects)]
+
+    names: list[str] = []
+    for item in objects:
+        name = _object_name(item)
+        if name:
+            names.append(name)
+    return names
+
+
+def _normalize_support(raw_support: Any) -> tuple[Any | None, list[str]]:
+    if raw_support is None:
+        return None, []
+
+    if hasattr(raw_support, "Name") or hasattr(raw_support, "Label"):
+        return raw_support, []
+
+    if not isinstance(raw_support, (list, tuple)) or not raw_support:
+        return None, []
+
+    first = raw_support[0]
+    if hasattr(first, "Name") or hasattr(first, "Label"):
+        sub_elements = _coerce_string_list(raw_support[1]) if len(raw_support) > 1 else []
+        return first, sub_elements
+
+    if isinstance(first, (list, tuple)) and first:
+        support_obj = first[0]
+        sub_elements = _coerce_string_list(first[1]) if len(first) > 1 else []
+        return support_obj, sub_elements
+
+    return None, []
+
+
+def _classify_support(support_obj: Any, sub_elements: list[str]) -> str:
+    type_id = str(getattr(support_obj, "TypeId", "") or "")
+    name = _object_name(support_obj)
+    lower_type = type_id.lower()
+    lower_name = name.lower()
+
+    if any(_is_generated_sub_element(item) for item in sub_elements):
+        return "generated_geometry"
+
+    stable_names = {"xy_plane", "xz_plane", "yz_plane", "origin"}
+    if lower_name in stable_names or "datum" in lower_type or lower_type.endswith("::plane"):
+        return "stable_reference"
+
+    if "sketcher::sketchobject" in lower_type:
+        return "sketch"
+
+    if "partdesign::" in lower_type or "part::" in lower_type:
+        return "generated_feature"
+
+    return "object"
+
+
+def _is_generated_sub_element(value: str) -> bool:
+    lower_value = value.lower()
+    return lower_value.startswith(("face", "edge", "vertex"))
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if item is not None]
+    return [str(value)]
+
+
+def _add_count_if_available(metadata: dict[str, Any], key: str, value: Any) -> None:
+    if value is None:
+        return
+    try:
+        metadata[key] = len(value)
+    except TypeError:
+        return
+
+
+def _extract_recompute_status(obj: Any) -> str | None:
+    state = getattr(obj, "State", None)
+    if state is None:
+        return None
+
+    values = _coerce_string_list(state)
+    lower_values = [value.lower() for value in values]
+    if any("error" in value or "invalid" in value or "failed" in value for value in lower_values):
+        return "error"
+    if any("touched" in value for value in lower_values):
+        return "touched"
+    return "ok"
+
+
+def _extract_error_status(obj: Any) -> str | None:
+    for attribute in ("Error", "ErrorString", "Status"):
+        value = getattr(obj, attribute, None)
+        if value:
+            return str(value)
+    return None

@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments and local config
+.venv/
+venv/
+.env
+.env.*
+
+# Packaging/build outputs
+build/
+dist/
+*.egg-info/
+
+# Local reports and generated output
+reports/
+model_health_reports/
+output/
+
+# FreeCAD backup/temp files
+*.FCStd1
+*.FCStd~
+*.FCBak
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
