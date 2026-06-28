@@ -10,7 +10,7 @@ from model_health_assistant.models import ModelHealthReport
 
 
 def report_to_dict(report: ModelHealthReport | dict[str, Any]) -> dict[str, Any]:
-    """Convert a report object into the Version 0.1 JSON shape."""
+    """Convert a report object into the local JSON report shape."""
 
     if isinstance(report, ModelHealthReport):
         return report.to_dict()

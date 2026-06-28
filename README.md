@@ -11,20 +11,21 @@ rename topology, invalidate downstream sketches, or cause recompute failures.
 This project focuses on making those dependency risks visible before they become
 hard-to-debug modeling problems.
 
-## MVP Scope
+## Current Scope
 
-Version 0.1 builds the local foundation only:
+Version 0.2 builds the local FreeCAD workbench/addon foundation:
 
 - Extract feature and dependency information from a FreeCAD document when run
   inside FreeCAD.
 - Represent model facts with pure Python dataclasses.
 - Run a local, rule-based risk engine.
 - Generate a human-readable JSON report on disk.
-- Provide a safe placeholder FreeCAD UI command.
+- Load as a FreeCAD workbench through `Init.py` and `InitGui.py`.
+- Register a FreeCAD command, workbench menu, and toolbar entry.
 
-## What Version 0.1 Does Not Include
+## What Version 0.2 Does Not Include
 
-Version 0.1 does not include:
+Version 0.2 does not include:
 
 - AI API calls
 - API-key storage
@@ -49,10 +50,6 @@ FreeCAD document
 -> FreeCAD UI summary
 ```
 
-The code is organized so a future AI explanation layer can be added after the
-local extractor and risk engine produce structured facts. The AI layer should
-explain known local findings, not discover facts directly from raw CAD files.
-
 ## Development
 
 Install the project in editable mode with test dependencies:
@@ -70,15 +67,21 @@ python -m pytest
 The tests only cover pure Python logic and do not require FreeCAD to be
 installed.
 
+## FreeCAD Addon Loading
+
+For local FreeCAD testing, place this project directory where FreeCAD can load
+Python addons, such as the user's FreeCAD `Mod` directory. FreeCAD will load:
+
+- `Init.py` for startup path setup.
+- `InitGui.py` for workbench registration.
+
+The addon exposes the package under `src` without requiring a network service or
+uploading CAD data.
+
 ## Future Roadmap
 
-- Local feature-tree extraction
-- Local risk engine
-- JSON reports
-- FreeCAD UI panel
-- Optional GPT/Claude explanation layer using user-provided API keys
-- Secure API-key storage with OS keychain
+- Broader FreeCAD workbench UI panel
+- More detailed feature-tree extraction
 - Dimension-change stress testing
 - Recompute failure detection
-- Opt-in anonymized training data
-- Future custom ML risk model
+- Additional deterministic local risk rules

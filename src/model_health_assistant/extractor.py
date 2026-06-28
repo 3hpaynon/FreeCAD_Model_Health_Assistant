@@ -136,7 +136,7 @@ def extract_sketch_support(obj: Any) -> dict[str, Any]:
 
 
 def build_model_snapshot(doc: Any | None) -> list[FeatureInfo]:
-    """Build the Version 0.1 model snapshot used by the risk engine."""
+    """Build the model snapshot used by the risk engine."""
 
     return extract_document_features(doc)
 

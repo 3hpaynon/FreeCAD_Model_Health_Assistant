@@ -35,7 +35,7 @@ COMMAND_NAME = "ModelHealthAssistant_AnalyzeFeatureTree"
 
 
 class AnalyzeFeatureTreeCommand:
-    """FreeCAD command that runs the local Version 0.1 analysis."""
+    """FreeCAD command that runs the local model-health analysis."""
 
     def GetResources(self) -> dict[str, str]:  # noqa: N802 - FreeCAD API name.
         """Return command metadata for FreeCAD."""
@@ -108,6 +108,3 @@ def _show_message(title: str, message: str) -> None:
 
     print(f"{title}: {message}")
 
-
-if Gui is not None:  # pragma: no cover - exercised only inside FreeCAD.
-    register_command()

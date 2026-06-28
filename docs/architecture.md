@@ -1,8 +1,9 @@
 # Model Health Assistant Architecture
 
 Model Health Assistant is designed as a local-first FreeCAD workbench. Version
-0.1 creates the foundation for feature-tree extraction, deterministic risk
-analysis, local JSON reporting, and a basic UI command.
+0.2 creates a loadable FreeCAD addon foundation with feature-tree extraction,
+deterministic risk analysis, local JSON reporting, and a registered workbench
+command.
 
 ## Local System Flow
 
@@ -13,10 +14,19 @@ FreeCAD document
 -> local risk engine
 -> JSON report
 -> UI summary
--> optional future AI explanation layer
 ```
 
-## Version 0.1 Components
+## Version 0.2 Components
+
+### FreeCAD Entry Points
+
+FreeCAD loads the addon through root-level `Init.py` and `InitGui.py` files.
+These files add the local `src` directory to `sys.path` so the package can be
+used directly from FreeCAD's addon directory without an installation step.
+
+`InitGui.py` defines `ModelHealthAssistantWorkbench`, registers it with
+FreeCADGui when available, and adds the model-health command to a workbench menu
+and toolbar.
 
 ### Extractor
 
@@ -43,7 +53,7 @@ and future UI or AI layers.
 
 ### Risk Engine
 
-`model_health_assistant.risk_engine` runs deterministic local rules. Version 0.1
+`model_health_assistant.risk_engine` runs deterministic local rules. Version 0.2
 includes rules for:
 
 - Sketches attached to generated geometry
@@ -63,10 +73,10 @@ storage. Reports include document name, timestamp, feature counts, sketch counts
 warning counts, health score, extracted features, warnings, and local-only
 analysis notes.
 
-### UI Placeholder
+### UI Command
 
-`model_health_assistant.ui` defines `AnalyzeFeatureTreeCommand`, a basic FreeCAD
-command placeholder. When run inside FreeCAD, the command is intended to:
+`model_health_assistant.ui` defines `AnalyzeFeatureTreeCommand`, a FreeCAD
+command. When run inside FreeCAD, the command:
 
 1. Read the active document.
 2. Extract feature information.
@@ -75,30 +85,19 @@ command placeholder. When run inside FreeCAD, the command is intended to:
 5. Show a simple summary dialog.
 
 The UI module is safe to import outside FreeCAD and does not require FreeCAD GUI
-modules during tests.
-
-## Future AI Layer
-
-The future AI layer should not discover facts directly from raw CAD files.
-Instead:
-
-1. The local extractor should produce structured model facts.
-2. The local risk engine should identify deterministic warnings.
-3. A future AI model may explain those already-known facts in clearer language.
-
-This separation keeps CAD-specific truth grounded in local analysis and limits
-what would need to be shared with any cloud model.
+modules during tests. Command registration is owned by the workbench lifecycle,
+not by import side effects.
 
 ## Privacy Design
 
-The long-term privacy posture should be explicit:
+The privacy posture is explicit:
 
 - CAD files stay local.
 - JSON reports stay local by default.
-- AI calls are user-triggered only.
-- Users must consent before sending any summary to a cloud model.
-- API keys should be stored with secure OS key storage, not plaintext files.
-- Any future anonymized training data collection must be opt-in.
+- No AI calls are made.
+- No API keys are stored.
+- No server backend is used.
+- No CAD files or reports are uploaded.
 
-Version 0.1 implements only the local foundation and contains no API-key,
+Version 0.2 implements only the local foundation and contains no API-key,
 server, cloud, upload, AI, or machine-learning code.

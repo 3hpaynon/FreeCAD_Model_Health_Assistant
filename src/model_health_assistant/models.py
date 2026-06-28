@@ -120,7 +120,7 @@ class ModelHealthReport:
         return len(self.warnings)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the report in the JSON shape used by Version 0.1."""
+        """Return the report in the JSON shape used by the local writer."""
 
         return {
             "document_name": self.document_name,

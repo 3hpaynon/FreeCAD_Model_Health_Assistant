@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 
+from model_health_assistant import __version__
 from model_health_assistant.models import FeatureInfo, ModelHealthReport, RiskWarning
 
 Rule = Callable[[Sequence[FeatureInfo]], list[RiskWarning]]
@@ -28,14 +29,14 @@ def analyze_model_health(
         warnings=warnings,
         notes=[
             "Local-only analysis. No CAD data was uploaded.",
-            "Version 0.1 uses deterministic rules only; no AI or machine learning was used.",
+            "Deterministic rules only; no AI or machine learning was used.",
         ],
-        metadata={"local_only": True, "engine_version": "0.1.0"},
+        metadata={"local_only": True, "engine_version": __version__},
     )
 
 
 def run_all_rules(features: Sequence[FeatureInfo]) -> list[RiskWarning]:
-    """Run every Version 0.1 rule in a stable order."""
+    """Run every deterministic local rule in a stable order."""
 
     rules: list[Rule] = [
         rule_sketch_attached_to_generated_geometry,
@@ -262,8 +263,9 @@ def rule_hardcoded_repeated_dimensions_placeholder(
 ) -> list[RiskWarning]:
     """Placeholder rule for future dimension-pattern analysis.
 
-    Version 0.1 does not parse dimension expressions deeply. If a future extractor
-    adds repeated-dimension metadata, this rule will already have a reporting path.
+    The extractor does not parse dimension expressions deeply. If a future
+    extractor adds repeated-dimension metadata, this rule will already have a
+    reporting path.
     """
 
     warnings: list[RiskWarning] = []
