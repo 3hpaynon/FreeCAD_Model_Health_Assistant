@@ -1,9 +1,9 @@
 """FreeCAD GUI workbench registration for Model Health Assistant."""
 
 from __future__ import annotations
-
-import sys
 from pathlib import Path
+import sys
+
 
 
 def ensure_src_on_path() -> Path:
