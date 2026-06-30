@@ -1,75 +1,93 @@
-"""FreeCAD GUI workbench registration for Model Health Assistant."""
+"""Minimal FreeCAD GUI workbench entrypoint for Model Health Assistant tests."""
 
 from __future__ import annotations
-from pathlib import Path
-import sys
 
+try:  # pragma: no cover - exercised inside FreeCAD.
+    import FreeCAD as App  # type: ignore
+except Exception:  # pragma: no cover - expected outside FreeCAD.
+    App = None
 
-
-def ensure_src_on_path() -> Path:
-    """Add the local ``src`` directory to ``sys.path`` when available."""
-
-    addon_root = Path(__file__).resolve().parent
-    src_dir = addon_root / "src"
-    if src_dir.is_dir():
-        src_text = str(src_dir)
-        if src_text not in sys.path:
-            sys.path.insert(0, src_text)
-    return src_dir
-
-
-ensure_src_on_path()
-
-try:  # pragma: no cover - exercised only inside FreeCAD.
+try:  # pragma: no cover - exercised inside FreeCAD.
     import FreeCADGui as Gui  # type: ignore
-except Exception:  # pragma: no cover - expected in normal unit tests.
+except Exception:  # pragma: no cover - expected outside FreeCAD.
     Gui = None
 
+try:  # pragma: no cover - FreeCAD provides Workbench at load time.
+    BaseWorkbench = Workbench  # type: ignore[name-defined]
+except NameError:  # pragma: no cover - expected outside FreeCAD.
 
-COMMANDS = ["ModelHealthAssistant_AnalyzeFeatureTree"]
+    class BaseWorkbench:
+        """Small fallback base class for tests outside FreeCAD."""
+
+        def appendToolbar(self, name, commands):  # noqa: N802
+            """No-op outside FreeCAD."""
+
+        def appendMenu(self, name, commands):  # noqa: N802
+            """No-op outside FreeCAD."""
+
+        def appendContextMenu(self, name, commands):  # noqa: N802
+            """No-op outside FreeCAD."""
 
 
-class ModelHealthAssistantWorkbench:
-    """Minimal FreeCAD workbench foundation for local model-health analysis."""
+class ModelHealthAssistantWorkbench(BaseWorkbench):
+    """Basic test workbench for verifying FreeCAD can load the addon."""
 
     MenuText = "Model Health Assistant"
-    ToolTip = "Run local model-health analysis tools."
+    ToolTip = "Basic test workbench for Model Health Assistant"
     Icon = ""
 
-    def Initialize(self) -> None:  # noqa: N802 - FreeCAD API name.
-        """Register commands, toolbar entries, and menu entries."""
+    def Initialize(self):  # noqa: N802
+        """Register the simple test command."""
 
-        from model_health_assistant.ui import register_command
+        class _TestCommand:
+            def GetResources(self):  # noqa: N802
+                return {
+                    "MenuText": "Test Model Health Assistant",
+                    "ToolTip": "Run a basic Model Health Assistant test command",
+                    "Pixmap": "",
+                }
 
-        register_command()
-        self.appendToolbar("Model Health", COMMANDS)
-        self.appendMenu("Model Health Assistant", COMMANDS)
+            def Activated(self):  # noqa: N802
+                message = "Model Health Assistant test command clicked.\n"
+                try:
+                    if App is not None and hasattr(App, "Console"):
+                        App.Console.PrintMessage(message)
+                        return
+                except Exception:
+                    pass
+                print(message, end="")
 
-    def Activated(self) -> None:  # noqa: N802 - FreeCAD API name.
+            def IsActive(self):  # noqa: N802
+                return True
+
+        if Gui is not None and hasattr(Gui, "addCommand"):
+            Gui.addCommand("MHA_TestCommand", _TestCommand())
+
+        self.appendToolbar("Model Health Assistant", ["MHA_TestCommand"])
+        self.appendMenu("Model Health Assistant", ["MHA_TestCommand"])
+
+        try:
+            if App is not None and hasattr(App, "Console"):
+                App.Console.PrintMessage(
+                    "Model Health Assistant test workbench initialized.\n"
+                )
+        except Exception:
+            pass
+
+    def Activated(self):  # noqa: N802
         """Run when the workbench becomes active."""
 
-    def Deactivated(self) -> None:  # noqa: N802 - FreeCAD API name.
+    def Deactivated(self):  # noqa: N802
         """Run when the workbench becomes inactive."""
 
-    def ContextMenu(self, recipient: str) -> None:  # noqa: N802 - FreeCAD API name.
-        """Add the workbench command to the FreeCAD context menu."""
+    def ContextMenu(self, recipient):  # noqa: N802
+        """Run when FreeCAD asks the workbench to populate a context menu."""
 
-        self.appendContextMenu("Model Health Assistant", COMMANDS)
-
-    def GetClassName(self) -> str:  # noqa: N802 - FreeCAD API name.
+    def GetClassName(self):  # noqa: N802
         """Return the FreeCAD workbench base class name."""
 
         return "Gui::PythonWorkbench"
 
 
-def register_workbench() -> bool:
-    """Register the workbench with FreeCADGui when available."""
-
-    if Gui is None:
-        return False
+if Gui is not None:  # pragma: no cover - exercised inside FreeCAD.
     Gui.addWorkbench(ModelHealthAssistantWorkbench())
-    return True
-
-
-if Gui is not None:  # pragma: no cover - exercised only inside FreeCAD.
-    register_workbench()
