@@ -31,7 +31,7 @@ except Exception:  # pragma: no cover
         QtWidgets = None
 
 
-COMMAND_NAME = "ModelHealthAssistant_AnalyzeFeatureTree"
+COMMAND_NAME = "MHA_AnalyzeFeatureTree"
 
 
 class AnalyzeFeatureTreeCommand:
@@ -107,4 +107,3 @@ def _show_message(title: str, message: str) -> None:
         return
 
     print(f"{title}: {message}")
-
