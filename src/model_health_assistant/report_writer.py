@@ -3,10 +3,40 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from model_health_assistant.models import ModelHealthReport
+
+
+def build_report_path(
+    document_name: str,
+    document_file_name: str = "",
+    generated_at: str | None = None,
+) -> Path:
+    """Build a timestamped local report path for a saved or unsaved document."""
+
+    safe_name = "".join(
+        char if char.isalnum() or char in {"-", "_"} else "_"
+        for char in document_name
+    ).strip("_") or "untitled"
+    timestamp = (
+        datetime.fromisoformat(generated_at)
+        if generated_at
+        else datetime.now().astimezone()
+    ).strftime("%Y-%m-%d_%H%M%S")
+
+    if document_file_name:
+        base_dir = Path(document_file_name).expanduser().resolve().parent
+    else:
+        base_dir = Path.home() / ".model_health_assistant"
+
+    return (
+        base_dir
+        / "model_health_reports"
+        / f"{safe_name}_model_health_{timestamp}.json"
+    )
 
 
 def report_to_dict(report: ModelHealthReport | dict[str, Any]) -> dict[str, Any]:

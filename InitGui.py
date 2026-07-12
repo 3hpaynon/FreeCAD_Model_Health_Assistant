@@ -61,19 +61,6 @@ class ModelHealthAssistantWorkbench(BaseWorkbench):
                         from model_health_assistant.extractor import extract_document_features
 
                         features = extract_document_features(document)
-                        sketch_count = sum(1 for feature in features if feature.is_sketch)
-                        message = (
-                            "Model Health Assistant: Extraction complete.\n"
-                            + "Document: "
-                            + str(document_name)
-                            + "\n"
-                            + "Total extracted features: "
-                            + str(len(features))
-                            + "\n"
-                            + "Total sketches: "
-                            + str(sketch_count)
-                            + "\n"
-                        )
                     except ImportError as exc:
                         message = (
                             "Model Health Assistant: Could not load the local extractor: "
@@ -90,6 +77,80 @@ class ModelHealthAssistantWorkbench(BaseWorkbench):
                             + str(exc)
                             + "\n"
                         )
+                    else:
+                        try:
+                            from model_health_assistant.risk_engine import analyze_model_health
+
+                            report = analyze_model_health(
+                                features,
+                                document_name=str(document_name),
+                            )
+                        except ImportError as exc:
+                            message = (
+                                "Model Health Assistant: Could not load the local risk engine: "
+                                + type(exc).__name__
+                                + ": "
+                                + str(exc)
+                                + "\n"
+                            )
+                        except Exception as exc:
+                            message = (
+                                "Model Health Assistant: Risk engine failed: "
+                                + type(exc).__name__
+                                + ": "
+                                + str(exc)
+                                + "\n"
+                            )
+                        else:
+                            try:
+                                from model_health_assistant.report_writer import (
+                                    build_report_path,
+                                    save_report_json,
+                                )
+
+                                output_path = build_report_path(
+                                    str(getattr(document, "Name", None) or document_name),
+                                    str(getattr(document, "FileName", "") or ""),
+                                    report.generated_at,
+                                )
+                                saved_path = save_report_json(report, output_path)
+                                message = (
+                                    "Model Health Assistant: Analysis complete.\n"
+                                    + "Document: "
+                                    + report.document_name
+                                    + "\n"
+                                    + "Total features: "
+                                    + str(report.total_feature_count)
+                                    + "\n"
+                                    + "Total sketches: "
+                                    + str(report.total_sketch_count)
+                                    + "\n"
+                                    + "Total warnings: "
+                                    + str(report.total_warning_count)
+                                    + "\n"
+                                    + "Health score: "
+                                    + str(report.health_score)
+                                    + "/100\n"
+                                    + "Report saved to:\n"
+                                    + str(saved_path)
+                                    + "\n"
+                                )
+                            except ImportError as exc:
+                                message = (
+                                    "Model Health Assistant: Could not load the local report writer: "
+                                    + type(exc).__name__
+                                    + ": "
+                                    + str(exc)
+                                    + "\n"
+                                )
+                            except Exception as exc:
+                                message = (
+                                    "Model Health Assistant: Report writing failed: "
+                                    + type(exc).__name__
+                                    + ": "
+                                    + str(exc)
+                                    + "\n"
+                                )
                 try:
                     if App is not None and hasattr(App, "Console"):
                         App.Console.PrintMessage(message)

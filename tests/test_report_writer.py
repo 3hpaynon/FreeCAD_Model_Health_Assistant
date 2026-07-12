@@ -1,5 +1,40 @@
+from pathlib import Path
+
 from model_health_assistant.models import FeatureInfo, ModelHealthReport, RiskWarning
-from model_health_assistant.report_writer import load_report_json, report_to_dict, save_report_json
+from model_health_assistant.report_writer import (
+    build_report_path,
+    load_report_json,
+    report_to_dict,
+    save_report_json,
+)
+
+
+def test_build_report_path_for_saved_document(tmp_path) -> None:
+    path = build_report_path(
+        "Mechanical-EM Coupler",
+        str(tmp_path / "Mechanical-EM Coupler.FCStd"),
+        "2026-06-28T22:15:00+00:00",
+    )
+
+    assert path == (
+        tmp_path
+        / "model_health_reports"
+        / "Mechanical-EM_Coupler_model_health_2026-06-28_221500.json"
+    )
+
+
+def test_build_report_path_for_unsaved_document() -> None:
+    path = build_report_path(
+        "Untitled document",
+        generated_at="2026-06-28T22:15:00+00:00",
+    )
+
+    assert path == (
+        Path.home()
+        / ".model_health_assistant"
+        / "model_health_reports"
+        / "Untitled_document_model_health_2026-06-28_221500.json"
+    )
 
 
 def test_report_to_dict_includes_summary_counts() -> None:

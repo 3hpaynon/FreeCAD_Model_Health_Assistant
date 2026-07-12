@@ -144,7 +144,7 @@ def test_test_command_prints_when_clicked(monkeypatch) -> None:
     assert messages == ["Model Health Assistant: No active FreeCAD document is open.\n"]
 
 
-def test_test_command_prints_active_document_name(monkeypatch) -> None:
+def test_test_command_prints_active_document_name(monkeypatch, tmp_path) -> None:
     messages = []
     fake_app = types.ModuleType("FreeCAD")
     fake_gui = types.ModuleType("FreeCADGui")
@@ -166,6 +166,15 @@ def test_test_command_prints_active_document_name(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "FreeCAD", fake_app)
     monkeypatch.setitem(sys.modules, "FreeCADGui", fake_gui)
 
+    from model_health_assistant import report_writer
+
+    output_path = tmp_path / "model_health_reports" / "active_document_report.json"
+    monkeypatch.setattr(
+        report_writer,
+        "build_report_path",
+        lambda document_name, document_file_name, generated_at: output_path,
+    )
+
     module = _load_module("mha_test_init_gui_active_document", REPO_ROOT / "InitGui.py")
     workbench = module.ModelHealthAssistantWorkbench()
     workbench.Initialize()
@@ -175,14 +184,20 @@ def test_test_command_prints_active_document_name(monkeypatch) -> None:
     command.Activated()
 
     assert messages == [
-        "Model Health Assistant: Extraction complete.\n"
+        "Model Health Assistant: Analysis complete.\n"
         "Document: Mechanical-EM Coupler Clutch Practice Model\n"
-        "Total extracted features: 0\n"
+        "Total features: 0\n"
         "Total sketches: 0\n"
+        "Total warnings: 0\n"
+        "Health score: 100/100\n"
+        "Report saved to:\n"
+        + str(output_path)
+        + "\n"
     ]
+    assert output_path.exists()
 
 
-def test_test_command_prints_extracted_feature_and_sketch_counts(monkeypatch) -> None:
+def test_test_command_prints_extracted_feature_and_sketch_counts(monkeypatch, tmp_path) -> None:
     messages = []
     fake_app = types.ModuleType("FreeCAD")
     fake_gui = types.ModuleType("FreeCADGui")
@@ -208,6 +223,15 @@ def test_test_command_prints_extracted_feature_and_sketch_counts(monkeypatch) ->
     monkeypatch.setitem(sys.modules, "FreeCAD", fake_app)
     monkeypatch.setitem(sys.modules, "FreeCADGui", fake_gui)
 
+    from model_health_assistant import report_writer
+
+    output_path = tmp_path / "model_health_reports" / "extracted_model_report.json"
+    monkeypatch.setattr(
+        report_writer,
+        "build_report_path",
+        lambda document_name, document_file_name, generated_at: output_path,
+    )
+
     module = _load_module("mha_test_init_gui_extraction", REPO_ROOT / "InitGui.py")
     workbench = module.ModelHealthAssistantWorkbench()
     workbench.Initialize()
@@ -217,11 +241,17 @@ def test_test_command_prints_extracted_feature_and_sketch_counts(monkeypatch) ->
     command.Activated()
 
     assert messages == [
-        "Model Health Assistant: Extraction complete.\n"
+        "Model Health Assistant: Analysis complete.\n"
         "Document: Demo Model\n"
-        "Total extracted features: 2\n"
+        "Total features: 2\n"
         "Total sketches: 1\n"
+        "Total warnings: 1\n"
+        "Health score: 95/100\n"
+        "Report saved to:\n"
+        + str(output_path)
+        + "\n"
     ]
+    assert output_path.exists()
 
 
 def test_test_command_reports_extractor_failure(monkeypatch) -> None:
@@ -261,6 +291,91 @@ def test_test_command_reports_extractor_failure(monkeypatch) -> None:
     assert messages == [
         "Model Health Assistant: Extractor failed: RuntimeError: "
         "could not read document objects\n"
+    ]
+
+
+def test_test_command_reports_risk_engine_failure(monkeypatch) -> None:
+    messages = []
+    fake_app = types.ModuleType("FreeCAD")
+    fake_gui = types.ModuleType("FreeCADGui")
+    fake_gui.commands = {}
+    fake_gui.addCommand = lambda name, command: fake_gui.commands.update({name: command})
+    fake_gui.addWorkbench = lambda workbench: None
+
+    class FakeConsole:
+        @staticmethod
+        def PrintMessage(message: str) -> None:  # noqa: N802 - FreeCAD API name.
+            messages.append(message)
+
+    fake_app.Console = FakeConsole
+    fake_app.ActiveDocument = types.SimpleNamespace(Name="Demo", Objects=[])
+
+    monkeypatch.setitem(sys.modules, "FreeCAD", fake_app)
+    monkeypatch.setitem(sys.modules, "FreeCADGui", fake_gui)
+
+    from model_health_assistant import risk_engine
+
+    def fail_analysis(features, document_name):
+        raise RuntimeError("could not analyze extracted features")
+
+    monkeypatch.setattr(risk_engine, "analyze_model_health", fail_analysis)
+
+    module = _load_module("mha_test_init_gui_risk_failure", REPO_ROOT / "InitGui.py")
+    workbench = module.ModelHealthAssistantWorkbench()
+    workbench.Initialize()
+    command = fake_gui.commands["MHA_TestCommand"]
+    messages.clear()
+
+    command.Activated()
+
+    assert messages == [
+        "Model Health Assistant: Risk engine failed: RuntimeError: "
+        "could not analyze extracted features\n"
+    ]
+
+
+def test_test_command_reports_report_writing_failure(monkeypatch, tmp_path) -> None:
+    messages = []
+    fake_app = types.ModuleType("FreeCAD")
+    fake_gui = types.ModuleType("FreeCADGui")
+    fake_gui.commands = {}
+    fake_gui.addCommand = lambda name, command: fake_gui.commands.update({name: command})
+    fake_gui.addWorkbench = lambda workbench: None
+
+    class FakeConsole:
+        @staticmethod
+        def PrintMessage(message: str) -> None:  # noqa: N802 - FreeCAD API name.
+            messages.append(message)
+
+    fake_app.Console = FakeConsole
+    fake_app.ActiveDocument = types.SimpleNamespace(Name="Demo", Objects=[])
+
+    monkeypatch.setitem(sys.modules, "FreeCAD", fake_app)
+    monkeypatch.setitem(sys.modules, "FreeCADGui", fake_gui)
+
+    from model_health_assistant import report_writer
+
+    monkeypatch.setattr(
+        report_writer,
+        "build_report_path",
+        lambda document_name, document_file_name, generated_at: tmp_path / "report.json",
+    )
+
+    def fail_save(report, output_path):
+        raise OSError("could not write report")
+
+    monkeypatch.setattr(report_writer, "save_report_json", fail_save)
+
+    module = _load_module("mha_test_init_gui_report_failure", REPO_ROOT / "InitGui.py")
+    workbench = module.ModelHealthAssistantWorkbench()
+    workbench.Initialize()
+    command = fake_gui.commands["MHA_TestCommand"]
+    messages.clear()
+
+    command.Activated()
+
+    assert messages == [
+        "Model Health Assistant: Report writing failed: OSError: could not write report\n"
     ]
 
 

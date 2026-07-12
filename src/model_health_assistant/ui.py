@@ -6,10 +6,8 @@ available, command registration simply does nothing.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from model_health_assistant.extractor import extract_document_features, get_active_document
-from model_health_assistant.report_writer import save_report_json
+from model_health_assistant.report_writer import build_report_path, save_report_json
 from model_health_assistant.risk_engine import analyze_model_health
 
 try:  # pragma: no cover - exercised only inside FreeCAD.
@@ -61,7 +59,7 @@ class AnalyzeFeatureTreeCommand:
 
         features = extract_document_features(doc)
         report = analyze_model_health(features, document_name=_document_name(doc))
-        output_path = _default_report_path(doc)
+        output_path = _default_report_path(doc, report.generated_at)
         save_report_json(report, output_path)
 
         summary = (
@@ -85,16 +83,9 @@ def _document_name(doc: object) -> str:
     return str(getattr(doc, "Name", None) or getattr(doc, "Label", None) or "Untitled")
 
 
-def _default_report_path(doc: object) -> Path:
-    safe_name = _safe_filename(_document_name(doc))
+def _default_report_path(doc: object, generated_at: str | None = None):
     file_name = str(getattr(doc, "FileName", "") or "")
-    base_dir = Path(file_name).resolve().parent if file_name else Path.cwd()
-    return base_dir / "model_health_reports" / f"{safe_name}_model_health_report.json"
-
-
-def _safe_filename(value: str) -> str:
-    cleaned = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in value)
-    return cleaned.strip("_") or "untitled"
+    return build_report_path(_document_name(doc), file_name, generated_at)
 
 
 def _show_message(title: str, message: str) -> None:
