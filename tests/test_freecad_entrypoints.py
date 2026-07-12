@@ -184,15 +184,16 @@ def test_test_command_prints_active_document_name(monkeypatch, tmp_path) -> None
     command.Activated()
 
     assert messages == [
-        "Model Health Assistant: Analysis complete.\n"
+        "------------------------------------------------------------------------------------\n"
+        "Model Health Assistant Analysis\n\n"
         "Document: Mechanical-EM Coupler Clutch Practice Model\n"
-        "Total features: 0\n"
-        "Total sketches: 0\n"
-        "Total warnings: 0\n"
+        "Features: 0\n"
+        "Sketches: 0\n"
+        "Warnings: 0\n"
         "Health score: 100/100\n"
         "Report saved to:\n"
         + str(output_path)
-        + "\n"
+        + "\n------------------------------------------------------------------------------------\n"
     ]
     assert output_path.exists()
 
@@ -241,15 +242,16 @@ def test_test_command_prints_extracted_feature_and_sketch_counts(monkeypatch, tm
     command.Activated()
 
     assert messages == [
-        "Model Health Assistant: Analysis complete.\n"
+        "------------------------------------------------------------------------------------\n"
+        "Model Health Assistant Analysis\n\n"
         "Document: Demo Model\n"
-        "Total features: 2\n"
-        "Total sketches: 1\n"
-        "Total warnings: 1\n"
+        "Features: 2\n"
+        "Sketches: 1\n"
+        "Warnings: 1\n"
         "Health score: 95/100\n"
         "Report saved to:\n"
         + str(output_path)
-        + "\n"
+        + "\n------------------------------------------------------------------------------------\n"
     ]
     assert output_path.exists()
 

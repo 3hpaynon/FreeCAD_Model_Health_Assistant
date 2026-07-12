@@ -115,17 +115,18 @@ class ModelHealthAssistantWorkbench(BaseWorkbench):
                                 )
                                 saved_path = save_report_json(report, output_path)
                                 message = (
-                                    "Model Health Assistant: Analysis complete.\n"
+                                    "------------------------------------------------------------------------------------\n"
+                                    + "Model Health Assistant Analysis\n\n"
                                     + "Document: "
                                     + report.document_name
                                     + "\n"
-                                    + "Total features: "
+                                    + "Features: "
                                     + str(report.total_feature_count)
                                     + "\n"
-                                    + "Total sketches: "
+                                    + "Sketches: "
                                     + str(report.total_sketch_count)
                                     + "\n"
-                                    + "Total warnings: "
+                                    + "Warnings: "
                                     + str(report.total_warning_count)
                                     + "\n"
                                     + "Health score: "
@@ -134,6 +135,7 @@ class ModelHealthAssistantWorkbench(BaseWorkbench):
                                     + "Report saved to:\n"
                                     + str(saved_path)
                                     + "\n"
+                                    + "------------------------------------------------------------------------------------\n"
                                 )
                             except ImportError as exc:
                                 message = (
