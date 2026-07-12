@@ -57,11 +57,39 @@ class ModelHealthAssistantWorkbench(BaseWorkbench):
                         or getattr(document, "Name", None)
                         or "Untitled"
                     )
-                    message = (
-                        "Model Health Assistant: Active document detected: "
-                        + str(document_name)
-                        + "\n"
-                    )
+                    try:
+                        from model_health_assistant.extractor import extract_document_features
+
+                        features = extract_document_features(document)
+                        sketch_count = sum(1 for feature in features if feature.is_sketch)
+                        message = (
+                            "Model Health Assistant: Extraction complete.\n"
+                            + "Document: "
+                            + str(document_name)
+                            + "\n"
+                            + "Total extracted features: "
+                            + str(len(features))
+                            + "\n"
+                            + "Total sketches: "
+                            + str(sketch_count)
+                            + "\n"
+                        )
+                    except ImportError as exc:
+                        message = (
+                            "Model Health Assistant: Could not load the local extractor: "
+                            + type(exc).__name__
+                            + ": "
+                            + str(exc)
+                            + "\n"
+                        )
+                    except Exception as exc:
+                        message = (
+                            "Model Health Assistant: Extractor failed: "
+                            + type(exc).__name__
+                            + ": "
+                            + str(exc)
+                            + "\n"
+                        )
                 try:
                     if App is not None and hasattr(App, "Console"):
                         App.Console.PrintMessage(message)

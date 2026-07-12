@@ -175,8 +175,92 @@ def test_test_command_prints_active_document_name(monkeypatch) -> None:
     command.Activated()
 
     assert messages == [
-        "Model Health Assistant: Active document detected: "
-        "Mechanical-EM Coupler Clutch Practice Model\n"
+        "Model Health Assistant: Extraction complete.\n"
+        "Document: Mechanical-EM Coupler Clutch Practice Model\n"
+        "Total extracted features: 0\n"
+        "Total sketches: 0\n"
+    ]
+
+
+def test_test_command_prints_extracted_feature_and_sketch_counts(monkeypatch) -> None:
+    messages = []
+    fake_app = types.ModuleType("FreeCAD")
+    fake_gui = types.ModuleType("FreeCADGui")
+    fake_gui.commands = {}
+    fake_gui.addCommand = lambda name, command: fake_gui.commands.update({name: command})
+    fake_gui.addWorkbench = lambda workbench: None
+
+    class FakeConsole:
+        @staticmethod
+        def PrintMessage(message: str) -> None:  # noqa: N802 - FreeCAD API name.
+            messages.append(message)
+
+    fake_app.Console = FakeConsole
+    fake_app.ActiveDocument = types.SimpleNamespace(
+        Name="Demo",
+        Label="Demo Model",
+        Objects=[
+            types.SimpleNamespace(Name="Sketch", TypeId="Sketcher::SketchObject"),
+            types.SimpleNamespace(Name="Pad", TypeId="PartDesign::Pad"),
+        ],
+    )
+
+    monkeypatch.setitem(sys.modules, "FreeCAD", fake_app)
+    monkeypatch.setitem(sys.modules, "FreeCADGui", fake_gui)
+
+    module = _load_module("mha_test_init_gui_extraction", REPO_ROOT / "InitGui.py")
+    workbench = module.ModelHealthAssistantWorkbench()
+    workbench.Initialize()
+    command = fake_gui.commands["MHA_TestCommand"]
+    messages.clear()
+
+    command.Activated()
+
+    assert messages == [
+        "Model Health Assistant: Extraction complete.\n"
+        "Document: Demo Model\n"
+        "Total extracted features: 2\n"
+        "Total sketches: 1\n"
+    ]
+
+
+def test_test_command_reports_extractor_failure(monkeypatch) -> None:
+    messages = []
+    fake_app = types.ModuleType("FreeCAD")
+    fake_gui = types.ModuleType("FreeCADGui")
+    fake_gui.commands = {}
+    fake_gui.addCommand = lambda name, command: fake_gui.commands.update({name: command})
+    fake_gui.addWorkbench = lambda workbench: None
+
+    class FakeConsole:
+        @staticmethod
+        def PrintMessage(message: str) -> None:  # noqa: N802 - FreeCAD API name.
+            messages.append(message)
+
+    class BrokenDocument:
+        Name = "Broken"
+
+        @property
+        def Objects(self):  # noqa: N802 - FreeCAD API name.
+            raise RuntimeError("could not read document objects")
+
+    fake_app.Console = FakeConsole
+    fake_app.ActiveDocument = BrokenDocument()
+
+    monkeypatch.setitem(sys.modules, "FreeCAD", fake_app)
+    monkeypatch.setitem(sys.modules, "FreeCADGui", fake_gui)
+
+    module = _load_module("mha_test_init_gui_extractor_failure", REPO_ROOT / "InitGui.py")
+    workbench = module.ModelHealthAssistantWorkbench()
+    workbench.Initialize()
+    command = fake_gui.commands["MHA_TestCommand"]
+    messages.clear()
+
+    command.Activated()
+
+    assert messages == [
+        "Model Health Assistant: Extractor failed: RuntimeError: "
+        "could not read document objects\n"
     ]
 
 
