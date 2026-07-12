@@ -48,7 +48,20 @@ class ModelHealthAssistantWorkbench(BaseWorkbench):
                 }
 
             def Activated(self):  # noqa: N802
-                message = "Model Health Assistant test command clicked.\n"
+                document = getattr(App, "ActiveDocument", None) if App is not None else None
+                if document is None:
+                    message = "Model Health Assistant: No active FreeCAD document is open.\n"
+                else:
+                    document_name = (
+                        getattr(document, "Label", None)
+                        or getattr(document, "Name", None)
+                        or "Untitled"
+                    )
+                    message = (
+                        "Model Health Assistant: Active document detected: "
+                        + str(document_name)
+                        + "\n"
+                    )
                 try:
                     if App is not None and hasattr(App, "Console"):
                         App.Console.PrintMessage(message)

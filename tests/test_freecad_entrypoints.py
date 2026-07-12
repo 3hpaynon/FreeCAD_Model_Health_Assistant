@@ -141,7 +141,43 @@ def test_test_command_prints_when_clicked(monkeypatch) -> None:
 
     command.Activated()
 
-    assert messages == ["Model Health Assistant test command clicked.\n"]
+    assert messages == ["Model Health Assistant: No active FreeCAD document is open.\n"]
+
+
+def test_test_command_prints_active_document_name(monkeypatch) -> None:
+    messages = []
+    fake_app = types.ModuleType("FreeCAD")
+    fake_gui = types.ModuleType("FreeCADGui")
+    fake_gui.commands = {}
+    fake_gui.addCommand = lambda name, command: fake_gui.commands.update({name: command})
+    fake_gui.addWorkbench = lambda workbench: None
+
+    class FakeConsole:
+        @staticmethod
+        def PrintMessage(message: str) -> None:  # noqa: N802 - FreeCAD API name.
+            messages.append(message)
+
+    fake_app.Console = FakeConsole
+    fake_app.ActiveDocument = types.SimpleNamespace(
+        Name="Mechanical_EM_Coupler",
+        Label="Mechanical-EM Coupler Clutch Practice Model",
+    )
+
+    monkeypatch.setitem(sys.modules, "FreeCAD", fake_app)
+    monkeypatch.setitem(sys.modules, "FreeCADGui", fake_gui)
+
+    module = _load_module("mha_test_init_gui_active_document", REPO_ROOT / "InitGui.py")
+    workbench = module.ModelHealthAssistantWorkbench()
+    workbench.Initialize()
+    command = fake_gui.commands["MHA_TestCommand"]
+    messages.clear()
+
+    command.Activated()
+
+    assert messages == [
+        "Model Health Assistant: Active document detected: "
+        "Mechanical-EM Coupler Clutch Practice Model\n"
+    ]
 
 
 def test_test_command_prints_normally_without_freecad_console(monkeypatch, capsys) -> None:
@@ -160,7 +196,10 @@ def test_test_command_prints_normally_without_freecad_console(monkeypatch, capsy
 
     command.Activated()
 
-    assert capsys.readouterr().out == "Model Health Assistant test command clicked.\n"
+    assert (
+        capsys.readouterr().out
+        == "Model Health Assistant: No active FreeCAD document is open.\n"
+    )
 
 
 def test_test_command_is_local_to_initialize() -> None:
