@@ -1,6 +1,7 @@
 from model_health_assistant.models import FeatureInfo, RiskWarning
 from model_health_assistant.risk_engine import (
     calculate_health_score,
+    rule_confirmed_feature_error,
     rule_high_downstream_dependency_count,
     rule_sketch_attached_to_generated_geometry,
 )
@@ -77,6 +78,34 @@ def test_stable_and_unknown_sketch_supports_do_not_produce_generated_geometry_wa
     ]
 
     assert rule_sketch_attached_to_generated_geometry(features) == []
+
+
+def test_confirmed_feature_error_produces_high_severity_warning() -> None:
+    feature = FeatureInfo(
+        internal_name="Pocket001",
+        has_confirmed_error=True,
+        error_details=["State: Invalid"],
+    )
+
+    warnings = rule_confirmed_feature_error([feature])
+
+    assert len(warnings) == 1
+    assert warnings[0].severity == "high"
+    assert warnings[0].message == (
+        "Pocket001 reports a confirmed FreeCAD error: State: Invalid"
+    )
+    assert warnings[0].rule_name == "rule_confirmed_feature_error"
+
+
+def test_unconfirmed_legacy_error_text_does_not_produce_error_warning() -> None:
+    feature = FeatureInfo(
+        internal_name="Pocket001",
+        recompute_status="error",
+        error_status="Invalid selection",
+        has_confirmed_error=False,
+    )
+
+    assert rule_confirmed_feature_error([feature]) == []
 
 
 def test_health_score_decreases_for_high_severity_warning() -> None:

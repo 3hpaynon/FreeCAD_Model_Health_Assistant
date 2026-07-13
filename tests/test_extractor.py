@@ -213,3 +213,110 @@ def test_extract_unreadable_support_property_is_unknown() -> None:
     assert result["notes"] == [
         "Sketch support could not be read: RuntimeError: support is unavailable"
     ]
+
+
+def test_extract_confirmed_error_from_freecad_state() -> None:
+    feature_object = SimpleNamespace(
+        Name="Pocket001",
+        TypeId="PartDesign::Pocket",
+        State=["Touched", "Invalid"],
+    )
+
+    feature = extract_document_features(SimpleNamespace(Objects=[feature_object]))[0]
+
+    assert feature.has_confirmed_error is True
+    assert feature.error_details == ["State: Invalid"]
+    assert feature.recompute_status == "error"
+
+
+def test_extract_confirmed_error_preserves_error_string() -> None:
+    feature_object = SimpleNamespace(
+        Name="Pad001",
+        TypeId="PartDesign::Pad",
+        ErrorString="Recompute failed: result is not a solid",
+    )
+
+    feature = extract_document_features(SimpleNamespace(Objects=[feature_object]))[0]
+
+    assert feature.has_confirmed_error is True
+    assert feature.error_details == [
+        "ErrorString: Recompute failed: result is not a solid"
+    ]
+    assert feature.error_status == "Recompute failed: result is not a solid"
+
+
+def test_extract_confirmed_error_from_invalid_non_null_shape() -> None:
+    class InvalidShape:
+        @staticmethod
+        def isNull():  # noqa: N802 - mirrors the FreeCAD API.
+            return False
+
+        @staticmethod
+        def isValid():  # noqa: N802 - mirrors the FreeCAD API.
+            return False
+
+    feature_object = SimpleNamespace(
+        Name="Fillet001",
+        TypeId="PartDesign::Fillet",
+        Shape=InvalidShape(),
+    )
+
+    feature = extract_document_features(SimpleNamespace(Objects=[feature_object]))[0]
+
+    assert feature.has_confirmed_error is True
+    assert feature.error_details == ["Shape validation reported invalid geometry."]
+
+
+def test_unavailable_or_nonerror_signals_are_not_confirmed_errors() -> None:
+    class NullShape:
+        @staticmethod
+        def isNull():  # noqa: N802 - mirrors the FreeCAD API.
+            return True
+
+        @staticmethod
+        def isValid():  # noqa: N802 - mirrors the FreeCAD API.
+            return False
+
+    feature_object = SimpleNamespace(
+        Name="Pad001",
+        TypeId="PartDesign::Pad",
+        State=["Touched"],
+        Error=False,
+        ErrorString="No error",
+        Status="Invalid selection in the user interface",
+        Shape=NullShape(),
+    )
+
+    feature = extract_document_features(SimpleNamespace(Objects=[feature_object]))[0]
+
+    assert feature.has_confirmed_error is False
+    assert feature.error_details == []
+    assert feature.recompute_status == "touched"
+    assert feature.error_status is None
+
+
+def test_unreadable_error_properties_do_not_create_an_error() -> None:
+    class UnreadableErrorProperties:
+        Name = "Pad001"
+        TypeId = "PartDesign::Pad"
+
+        @property
+        def State(self):  # noqa: N802 - mirrors the FreeCAD property name.
+            raise RuntimeError("state unavailable")
+
+        @property
+        def Error(self):  # noqa: N802 - mirrors the FreeCAD property name.
+            raise RuntimeError("error unavailable")
+
+        @property
+        def Shape(self):  # noqa: N802 - mirrors the FreeCAD property name.
+            raise RuntimeError("shape unavailable")
+
+    feature = extract_document_features(
+        SimpleNamespace(Objects=[UnreadableErrorProperties()])
+    )[0]
+
+    assert feature.has_confirmed_error is False
+    assert feature.error_details == []
+    assert feature.recompute_status is None
+    assert feature.error_status is None

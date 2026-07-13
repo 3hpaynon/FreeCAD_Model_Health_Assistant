@@ -49,7 +49,7 @@ def run_all_rules(features: Sequence[FeatureInfo]) -> list[RiskWarning]:
     rules: list[Rule] = [
         rule_sketch_attached_to_generated_geometry,
         rule_underdefined_sketch_placeholder,
-        rule_feature_recompute_error_placeholder,
+        rule_confirmed_feature_error,
         rule_early_fillet_or_chamfer,
         rule_high_downstream_dependency_count,
         rule_missing_sketch_support,
@@ -138,37 +138,43 @@ def rule_underdefined_sketch_placeholder(features: Sequence[FeatureInfo]) -> lis
     return warnings
 
 
-def rule_feature_recompute_error_placeholder(features: Sequence[FeatureInfo]) -> list[RiskWarning]:
-    """Warn when extracted status fields indicate a broken or failed feature."""
+def rule_confirmed_feature_error(features: Sequence[FeatureInfo]) -> list[RiskWarning]:
+    """Warn only when extraction found confirmed FreeCAD error evidence."""
 
     warnings: list[RiskWarning] = []
     for feature in features:
-        status_text = " ".join(
-            value.lower()
-            for value in (feature.recompute_status, feature.error_status)
-            if value
-        )
-        if not any(marker in status_text for marker in ("error", "failed", "invalid", "broken")):
+        if not feature.has_confirmed_error:
             continue
 
+        error_detail = "; ".join(feature.error_details) or "FreeCAD reported an error state."
         warnings.append(
             RiskWarning(
                 warning_id="MHA-FEATURE-ERROR-001",
                 severity="high",
                 affected_feature_name=feature.internal_name,
-                message=f"{feature.internal_name} appears to have a recompute or error status.",
+                message=(
+                    f"{feature.internal_name} reports a confirmed FreeCAD error: {error_detail}"
+                ),
                 technical_reason=(
-                    "A feature with an error state can invalidate downstream geometry and hide "
-                    "additional dependency problems."
+                    "FreeCAD exposed an explicit error state or invalid non-null shape for this "
+                    "object. Confirmed failures can invalidate downstream geometry."
                 ),
                 suggested_practice=(
                     "Resolve recompute errors from the earliest failing feature before editing "
                     "later operations."
                 ),
-                rule_name="rule_feature_recompute_error_placeholder",
+                rule_name="rule_confirmed_feature_error",
             )
         )
     return warnings
+
+
+def rule_feature_recompute_error_placeholder(
+    features: Sequence[FeatureInfo],
+) -> list[RiskWarning]:
+    """Backward-compatible alias for the confirmed-error rule."""
+
+    return rule_confirmed_feature_error(features)
 
 
 def rule_early_fillet_or_chamfer(features: Sequence[FeatureInfo]) -> list[RiskWarning]:

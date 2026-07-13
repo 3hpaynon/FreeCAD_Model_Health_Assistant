@@ -105,6 +105,8 @@ def extract_feature_info(obj: Any) -> FeatureInfo:
         if constraint_status is not None:
             metadata["constraint_status"] = str(constraint_status)
 
+    confirmed_error = extract_confirmed_error_state(obj)
+
     return FeatureInfo(
         internal_name=name,
         label=label,
@@ -125,6 +127,8 @@ def extract_feature_info(obj: Any) -> FeatureInfo:
             support.get("support_is_stable_reference", False)
         ),
         support_confidence=support.get("support_confidence", "low"),
+        has_confirmed_error=bool(confirmed_error["has_confirmed_error"]),
+        error_details=list(confirmed_error["error_details"]),
     )
 
 
@@ -183,6 +187,45 @@ def extract_downstream_dependents(obj: Any) -> list[str]:
         except Exception:
             in_list = []
     return _names_from_objects(in_list or [])
+
+
+def extract_confirmed_error_state(obj: Any) -> dict[str, Any]:
+    """Return confirmed FreeCAD error evidence without treating missing data as failure."""
+
+    details: list[str] = []
+
+    state = _safe_attribute(obj, "State")
+    if state is not _MISSING:
+        for value in _coerce_string_list(state):
+            text = value.strip()
+            if _contains_error_marker(text):
+                _append_unique(details, f"State: {text}")
+
+    for attribute in ("Error", "ErrorString"):
+        value = _safe_attribute(obj, attribute)
+        error_text = _meaningful_error_field(value)
+        if error_text is not None:
+            _append_unique(details, f"{attribute}: {error_text}")
+
+    get_status_string = _safe_attribute(obj, "getStatusString")
+    if callable(get_status_string):
+        try:
+            status_text = str(get_status_string() or "").strip()
+        except Exception:
+            status_text = ""
+        if _contains_error_marker(status_text):
+            _append_unique(details, f"Status: {status_text}")
+
+    shape = _safe_attribute(obj, "Shape")
+    if shape is not _MISSING and shape is not None:
+        shape_is_null = _call_bool_method(shape, "isNull")
+        if shape_is_null is not True and _call_bool_method(shape, "isValid") is False:
+            _append_unique(details, "Shape validation reported invalid geometry.")
+
+    return {
+        "has_confirmed_error": bool(details),
+        "error_details": details,
+    }
 
 
 def is_sketch_object(obj: Any) -> bool:
@@ -380,22 +423,71 @@ def _add_count_if_available(metadata: dict[str, Any], key: str, value: Any) -> N
 
 
 def _extract_recompute_status(obj: Any) -> str | None:
-    state = getattr(obj, "State", None)
-    if state is None:
+    state = _safe_attribute(obj, "State")
+    if state is _MISSING or state is None:
         return None
 
     values = _coerce_string_list(state)
-    lower_values = [value.lower() for value in values]
-    if any("error" in value or "invalid" in value or "failed" in value for value in lower_values):
+    if any(_contains_error_marker(value) for value in values):
         return "error"
-    if any("touched" in value for value in lower_values):
+    if any("touched" in value.lower() for value in values):
         return "touched"
     return "ok"
 
 
 def _extract_error_status(obj: Any) -> str | None:
-    for attribute in ("Error", "ErrorString", "Status"):
-        value = getattr(obj, attribute, None)
-        if value:
-            return str(value)
+    for attribute in ("Error", "ErrorString"):
+        error_text = _meaningful_error_field(_safe_attribute(obj, attribute))
+        if error_text is not None:
+            return error_text
     return None
+
+
+def _safe_attribute(obj: Any, attribute: str) -> Any:
+    try:
+        return getattr(obj, attribute, _MISSING)
+    except Exception:
+        return _MISSING
+
+
+def _meaningful_error_field(value: Any) -> str | None:
+    if value is _MISSING or value is None or callable(value):
+        return None
+    if isinstance(value, bool):
+        return "True" if value else None
+    if isinstance(value, (int, float)):
+        return str(value) if value != 0 else None
+
+    text = str(value).strip()
+    if not text or _is_clear_error_text(text):
+        return None
+    return text
+
+
+def _contains_error_marker(value: str) -> bool:
+    text = value.strip().lower()
+    if not text or _is_clear_error_text(text):
+        return False
+    markers = ("error", "failed", "failure", "invalid", "broken")
+    return any(marker in text for marker in markers)
+
+
+def _is_clear_error_text(value: str) -> bool:
+    text = value.strip().lower()
+    return text in {"0", "false", "none", "ok"} or "no error" in text
+
+
+def _call_bool_method(obj: Any, method_name: str) -> bool | None:
+    method = _safe_attribute(obj, method_name)
+    if not callable(method):
+        return None
+    try:
+        result = method()
+    except Exception:
+        return None
+    return result if isinstance(result, bool) else None
+
+
+def _append_unique(values: list[str], value: str) -> None:
+    if value not in values:
+        values.append(value)

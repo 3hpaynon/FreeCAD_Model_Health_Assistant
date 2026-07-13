@@ -45,6 +45,8 @@ class FeatureInfo:
     support_subelement: str | None = None
     support_is_stable_reference: bool = False
     support_confidence: SupportConfidence = "low"
+    has_confirmed_error: bool = False
+    error_details: list[str] = field(default_factory=list)
 
     @property
     def direct_upstream_count(self) -> int:
