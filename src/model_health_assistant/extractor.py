@@ -9,7 +9,59 @@ from __future__ import annotations
 
 from typing import Any
 
-from model_health_assistant.models import FeatureInfo
+from model_health_assistant.models import FeatureCategory, FeatureInfo
+
+
+_ADDITIVE_FEATURE_TYPES = {
+    "PartDesign::Pad",
+    "PartDesign::Revolution",
+    "PartDesign::AdditiveLoft",
+    "PartDesign::AdditivePipe",
+    "PartDesign::AdditiveHelix",
+}
+_SUBTRACTIVE_FEATURE_TYPES = {
+    "PartDesign::Pocket",
+    "PartDesign::Groove",
+    "PartDesign::SubtractiveLoft",
+    "PartDesign::SubtractivePipe",
+    "PartDesign::SubtractiveHelix",
+}
+_FINISHING_FEATURE_TYPES = {
+    "PartDesign::Fillet",
+    "PartDesign::Chamfer",
+    "PartDesign::Draft",
+    "PartDesign::Thickness",
+}
+_PATTERN_FEATURE_TYPES = {
+    "PartDesign::LinearPattern",
+    "PartDesign::PolarPattern",
+    "PartDesign::Mirrored",
+    "PartDesign::MultiTransform",
+    "PartDesign::Scaled",
+}
+_REFERENCE_GEOMETRY_TYPES = {
+    "App::OriginFeature",
+    "App::Plane",
+    "App::Line",
+    "App::Point",
+    "PartDesign::Plane",
+    "PartDesign::Line",
+    "PartDesign::Point",
+    "PartDesign::DatumPlane",
+    "PartDesign::DatumLine",
+    "PartDesign::DatumPoint",
+    "PartDesign::CoordinateSystem",
+    "PartDesign::ShapeBinder",
+    "PartDesign::SubShapeBinder",
+}
+_CONTAINER_TYPES = {
+    "App::DocumentObjectGroup",
+    "App::DocumentObjectGroupPython",
+    "App::LinkGroup",
+    "App::Origin",
+    "App::Part",
+    "PartDesign::Body",
+}
 
 try:  # pragma: no cover - exercised only inside FreeCAD.
     import FreeCAD as App  # type: ignore
@@ -56,6 +108,7 @@ def extract_feature_info(obj: Any) -> FeatureInfo:
         internal_name=name,
         label=label,
         type_id=type_id,
+        category=classify_feature_type(type_id),
         dependency_names=extract_dependencies(obj),
         downstream_dependent_names=extract_downstream_dependents(obj),
         is_sketch=is_sketch,
@@ -67,6 +120,35 @@ def extract_feature_info(obj: Any) -> FeatureInfo:
         notes=list(support.get("notes", [])),
         metadata=metadata,
     )
+
+
+def classify_feature_type(type_id: str) -> FeatureCategory:
+    """Classify a FreeCAD TypeId without relying on user-controlled object names."""
+
+    normalized_type = str(type_id or "").strip()
+    lower_type = normalized_type.lower()
+
+    if "sketcher::sketchobject" in lower_type:
+        return "sketch"
+    if normalized_type in _CONTAINER_TYPES:
+        return "container"
+    if normalized_type in _REFERENCE_GEOMETRY_TYPES:
+        return "reference_geometry"
+    if normalized_type in _ADDITIVE_FEATURE_TYPES:
+        return "additive_feature"
+    if normalized_type in _SUBTRACTIVE_FEATURE_TYPES:
+        return "subtractive_feature"
+    if normalized_type in _FINISHING_FEATURE_TYPES:
+        return "finishing_feature"
+    if normalized_type in _PATTERN_FEATURE_TYPES:
+        return "pattern_feature"
+
+    type_name = normalized_type.rsplit("::", 1)[-1].lower()
+    if type_name.startswith("additive"):
+        return "additive_feature"
+    if type_name.startswith("subtractive"):
+        return "subtractive_feature"
+    return "other"
 
 
 def extract_dependencies(obj: Any) -> list[str]:
