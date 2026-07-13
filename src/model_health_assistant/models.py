@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 Severity = Literal["low", "medium", "high"]
+SupportConfidence = Literal["low", "medium", "high"]
 FeatureCategory = Literal[
     "sketch",
     "additive_feature",
@@ -41,6 +42,9 @@ class FeatureInfo:
     notes: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     category: FeatureCategory = "other"
+    support_subelement: str | None = None
+    support_is_stable_reference: bool = False
+    support_confidence: SupportConfidence = "low"
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly dictionary."""

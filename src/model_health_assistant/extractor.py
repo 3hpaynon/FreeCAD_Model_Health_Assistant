@@ -62,6 +62,7 @@ _CONTAINER_TYPES = {
     "App::Part",
     "PartDesign::Body",
 }
+_MISSING = object()
 
 try:  # pragma: no cover - exercised only inside FreeCAD.
     import FreeCAD as App  # type: ignore
@@ -119,6 +120,11 @@ def extract_feature_info(obj: Any) -> FeatureInfo:
         error_status=_extract_error_status(obj),
         notes=list(support.get("notes", [])),
         metadata=metadata,
+        support_subelement=support.get("support_subelement"),
+        support_is_stable_reference=bool(
+            support.get("support_is_stable_reference", False)
+        ),
+        support_confidence=support.get("support_confidence", "low"),
     )
 
 
@@ -194,25 +200,48 @@ def extract_sketch_support(obj: Any) -> dict[str, Any]:
     function intentionally classifies support conservatively.
     """
 
-    raw_support = getattr(obj, "Support", None)
+    try:
+        raw_support = getattr(obj, "Support", _MISSING)
+    except Exception as exc:
+        return _unknown_support(
+            f"Sketch support could not be read: {type(exc).__name__}: {exc}"
+        )
+
+    if raw_support is _MISSING:
+        return _unknown_support("Sketch support property was not available.")
+
+    if raw_support is None or (
+        isinstance(raw_support, (list, tuple)) and not raw_support
+    ):
+        return {
+            "support_name": None,
+            "support_kind": "no_support",
+            "support_subelement": None,
+            "attached_to_generated_geometry": False,
+            "support_is_stable_reference": False,
+            "support_confidence": "high",
+            "notes": ["Sketch has no support object."],
+        }
+
     support_obj, sub_elements = _normalize_support(raw_support)
 
     if support_obj is None:
-        return {
-            "support_name": None,
-            "support_kind": "unknown",
-            "attached_to_generated_geometry": False,
-            "notes": ["Sketch support information was not available."],
-        }
+        return _unknown_support("Sketch support format was not recognized.")
 
     support_name = _object_name(support_obj)
-    support_kind = _classify_support(support_obj, sub_elements)
-    attached_to_generated_geometry = support_kind in {"generated_geometry", "generated_feature"}
+    support_kind, is_stable_reference, confidence = _classify_support(
+        support_obj, sub_elements
+    )
+    support_subelement = sub_elements[0] if sub_elements else None
+    attached_to_generated_geometry = support_kind == "generated_geometry"
 
     return {
         "support_name": support_name,
         "support_kind": support_kind,
+        "support_subelement": support_subelement,
         "attached_to_generated_geometry": attached_to_generated_geometry,
+        "support_is_stable_reference": is_stable_reference,
+        "support_confidence": confidence,
         "notes": [],
     }
 
@@ -252,42 +281,80 @@ def _normalize_support(raw_support: Any) -> tuple[Any | None, list[str]]:
 
     first = raw_support[0]
     if hasattr(first, "Name") or hasattr(first, "Label"):
-        sub_elements = _coerce_string_list(raw_support[1]) if len(raw_support) > 1 else []
+        sub_elements = _support_sub_elements(raw_support[1]) if len(raw_support) > 1 else []
         return first, sub_elements
 
     if isinstance(first, (list, tuple)) and first:
         support_obj = first[0]
-        sub_elements = _coerce_string_list(first[1]) if len(first) > 1 else []
+        sub_elements = _support_sub_elements(first[1]) if len(first) > 1 else []
         return support_obj, sub_elements
 
     return None, []
 
 
-def _classify_support(support_obj: Any, sub_elements: list[str]) -> str:
+def _classify_support(
+    support_obj: Any,
+    sub_elements: list[str],
+) -> tuple[str, bool, str]:
     type_id = str(getattr(support_obj, "TypeId", "") or "")
     name = _object_name(support_obj)
     lower_type = type_id.lower()
     lower_name = name.lower()
 
     if any(_is_generated_sub_element(item) for item in sub_elements):
-        return "generated_geometry"
+        return "generated_geometry", False, "high"
 
-    stable_names = {"xy_plane", "xz_plane", "yz_plane", "origin"}
-    if lower_name in stable_names or "datum" in lower_type or lower_type.endswith("::plane"):
-        return "stable_reference"
+    origin_plane_names = {"xy_plane", "xz_plane", "yz_plane"}
+    if lower_name in origin_plane_names or any(
+        item.lower() in origin_plane_names for item in sub_elements
+    ):
+        return "origin_plane", True, "high"
+
+    if lower_type in {"partdesign::plane", "partdesign::datumplane"}:
+        return "datum_plane", True, "high"
+
+    stable_reference_types = {
+        "app::originfeature",
+        "app::plane",
+        "app::line",
+        "app::point",
+        "partdesign::line",
+        "partdesign::point",
+        "partdesign::datumline",
+        "partdesign::datumpoint",
+        "partdesign::coordinatesystem",
+    }
+    if lower_name == "origin" or lower_type in stable_reference_types:
+        return "stable_reference", True, "high"
 
     if "sketcher::sketchobject" in lower_type:
-        return "sketch"
+        return "sketch", False, "medium"
 
     if "partdesign::" in lower_type or "part::" in lower_type:
-        return "generated_feature"
+        return "feature", False, "low"
 
-    return "object"
+    return "object", False, "low"
 
 
 def _is_generated_sub_element(value: str) -> bool:
-    lower_value = value.lower()
+    lower_value = value.strip().lower()
     return lower_value.startswith(("face", "edge", "vertex"))
+
+
+def _support_sub_elements(value: Any) -> list[str]:
+    return [item.strip() for item in _coerce_string_list(value) if item.strip()]
+
+
+def _unknown_support(note: str) -> dict[str, Any]:
+    return {
+        "support_name": None,
+        "support_kind": "unknown",
+        "support_subelement": None,
+        "attached_to_generated_geometry": False,
+        "support_is_stable_reference": False,
+        "support_confidence": "low",
+        "notes": [note],
+    }
 
 
 def _coerce_string_list(value: Any) -> list[str]:
