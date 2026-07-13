@@ -46,10 +46,25 @@ class FeatureInfo:
     support_is_stable_reference: bool = False
     support_confidence: SupportConfidence = "low"
 
+    @property
+    def direct_upstream_count(self) -> int:
+        """Return the number of direct objects this feature depends on."""
+
+        return len(self.dependency_names)
+
+    @property
+    def direct_downstream_count(self) -> int:
+        """Return the number of direct objects that depend on this feature."""
+
+        return len(self.downstream_dependent_names)
+
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly dictionary."""
 
-        return asdict(self)
+        data = asdict(self)
+        data["direct_upstream_count"] = self.direct_upstream_count
+        data["direct_downstream_count"] = self.direct_downstream_count
+        return data
 
 
 @dataclass(slots=True)

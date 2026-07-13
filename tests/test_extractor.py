@@ -71,6 +71,50 @@ def test_extract_document_features_classifies_every_document_object() -> None:
     ]
 
 
+def test_extract_feature_records_unique_direct_dependency_relationships() -> None:
+    sketch = SimpleNamespace(Name="Sketch")
+    pad = SimpleNamespace(Name="Pad")
+    pocket = SimpleNamespace(Name="Pocket")
+    fillet = SimpleNamespace(Name="Fillet")
+    feature_object = SimpleNamespace(
+        Name="Pad001",
+        TypeId="PartDesign::Pad",
+        OutList=[sketch, pad, sketch],
+        InList=[pocket, fillet, pocket],
+    )
+
+    feature = extract_document_features(SimpleNamespace(Objects=[feature_object]))[0]
+
+    assert feature.dependency_names == ["Sketch", "Pad"]
+    assert feature.downstream_dependent_names == ["Pocket", "Fillet"]
+    assert feature.direct_upstream_count == 2
+    assert feature.direct_downstream_count == 2
+    assert feature.to_dict()["direct_upstream_count"] == 2
+    assert feature.to_dict()["direct_downstream_count"] == 2
+
+
+def test_extract_feature_uses_direct_dependency_method_fallbacks() -> None:
+    upstream = SimpleNamespace(Name="Sketch")
+    downstream = SimpleNamespace(Name="Pocket")
+
+    class MethodBasedFeature:
+        Name = "Pad"
+        TypeId = "PartDesign::Pad"
+
+        def getOutList(self):  # noqa: N802 - mirrors the FreeCAD API.
+            return [upstream]
+
+        def getInList(self):  # noqa: N802 - mirrors the FreeCAD API.
+            return [downstream]
+
+    feature = extract_document_features(
+        SimpleNamespace(Objects=[MethodBasedFeature()])
+    )[0]
+
+    assert feature.dependency_names == ["Sketch"]
+    assert feature.downstream_dependent_names == ["Pocket"]
+
+
 def test_extract_origin_plane_support() -> None:
     support = SimpleNamespace(Name="XY_Plane", TypeId="App::Plane")
 

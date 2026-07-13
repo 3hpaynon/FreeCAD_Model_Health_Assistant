@@ -158,10 +158,10 @@ def classify_feature_type(type_id: str) -> FeatureCategory:
 
 
 def extract_dependencies(obj: Any) -> list[str]:
-    """Return names of objects this object depends on.
+    """Return names of objects this object directly depends on.
 
-    FreeCAD commonly exposes these through ``OutList``. The helper also supports
-    simple fake objects used in tests.
+    FreeCAD exposes direct upstream relationships through ``OutList``. The
+    helper also supports simple fake objects used in tests.
     """
 
     out_list = getattr(obj, "OutList", None)
@@ -174,7 +174,7 @@ def extract_dependencies(obj: Any) -> list[str]:
 
 
 def extract_downstream_dependents(obj: Any) -> list[str]:
-    """Return names of objects that depend on this object."""
+    """Return names of objects that directly depend on this object."""
 
     in_list = getattr(obj, "InList", None)
     if in_list is None and hasattr(obj, "getInList"):
@@ -259,13 +259,16 @@ def _object_name(obj: Any) -> str:
 
 def _names_from_objects(objects: Any) -> list[str]:
     if hasattr(objects, "Name") or hasattr(objects, "Label"):
-        return [_object_name(objects)]
+        objects = [objects]
 
     names: list[str] = []
+    seen: set[str] = set()
     for item in objects:
         name = _object_name(item)
-        if name:
-            names.append(name)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
     return names
 
 

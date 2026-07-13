@@ -10,6 +10,14 @@ from model_health_assistant.models import FeatureInfo, ModelHealthReport, RiskWa
 
 Rule = Callable[[Sequence[FeatureInfo]], list[RiskWarning]]
 
+_DEPENDENCY_RELEVANT_CATEGORIES = {
+    "sketch",
+    "additive_feature",
+    "subtractive_feature",
+    "finishing_feature",
+    "pattern_feature",
+}
+
 
 def analyze_model_health(
     features: Sequence[FeatureInfo],
@@ -57,26 +65,35 @@ def run_all_rules(features: Sequence[FeatureInfo]) -> list[RiskWarning]:
 def rule_sketch_attached_to_generated_geometry(
     features: Sequence[FeatureInfo],
 ) -> list[RiskWarning]:
-    """Warn when a sketch appears attached to generated geometry."""
+    """Warn for confirmed sketch support on a generated face, edge, or vertex."""
 
     warnings: list[RiskWarning] = []
     for feature in features:
-        if not feature.is_sketch or not feature.attached_to_generated_geometry:
+        support_subelement = feature.support_subelement or ""
+        has_generated_support = (
+            feature.is_sketch
+            and feature.support_kind == "generated_geometry"
+            and feature.support_confidence == "high"
+            and not feature.support_is_stable_reference
+            and bool(feature.support_name)
+            and support_subelement.lower().startswith(("face", "edge", "vertex"))
+        )
+        if not has_generated_support:
             continue
 
-        support_name = feature.support_name or "another generated feature"
         warnings.append(
             RiskWarning(
                 warning_id="MHA-SKETCH-SUPPORT-001",
-                severity="high",
+                severity="medium",
                 affected_feature_name=feature.internal_name,
                 message=(
-                    f"{feature.internal_name} appears to be attached to generated geometry "
-                    f"from {support_name}."
+                    f"{feature.internal_name} appears to depend on generated geometry from "
+                    f"{support_subelement} of {feature.support_name}. Changes to upstream "
+                    "geometry may invalidate or remap this reference."
                 ),
                 technical_reason=(
-                    "Sketches attached to generated faces, edges, or feature output can break "
-                    "when earlier topology changes after an edit."
+                    "The sketch support is an explicit generated face, edge, or vertex. Such "
+                    "topological references can change when upstream features are edited."
                 ),
                 suggested_practice=(
                     "Attach sketches to a datum plane, origin plane, or other stable reference "
@@ -192,30 +209,35 @@ def rule_high_downstream_dependency_count(
     features: Sequence[FeatureInfo],
     threshold: int = 5,
 ) -> list[RiskWarning]:
-    """Warn when many later features depend on a single feature."""
+    """Identify meaningful features with many direct downstream dependents."""
 
     warnings: list[RiskWarning] = []
     for feature in features:
-        downstream_count = len(feature.downstream_dependent_names)
-        if downstream_count < threshold:
+        downstream_count = feature.direct_downstream_count
+        if (
+            feature.category not in _DEPENDENCY_RELEVANT_CATEGORIES
+            or downstream_count < threshold
+        ):
             continue
 
-        severity = "high" if downstream_count >= threshold * 2 else "medium"
+        severity = "medium" if downstream_count >= threshold * 2 else "low"
         warnings.append(
             RiskWarning(
                 warning_id="MHA-HIGH-IMPACT-001",
                 severity=severity,
                 affected_feature_name=feature.internal_name,
                 message=(
-                    f"{feature.internal_name} has {downstream_count} downstream dependents."
+                    f"{feature.internal_name} has {downstream_count} direct downstream "
+                    "dependents. Changes to this feature may affect a large portion of the model."
                 ),
                 technical_reason=(
-                    "Changes to high-impact features can cause many later operations to recompute "
-                    "or fail."
+                    "This feature is directly referenced by many document objects. This is a "
+                    "dependency-centrality observation, not evidence that the feature is modeled "
+                    "incorrectly."
                 ),
                 suggested_practice=(
-                    "Keep high-impact features simple, stable, and well named. Consider using "
-                    "datum references for downstream sketches."
+                    "Review downstream impact before changing this feature, and keep its design "
+                    "intent and references clear and stable."
                 ),
                 rule_name="rule_high_downstream_dependency_count",
             )

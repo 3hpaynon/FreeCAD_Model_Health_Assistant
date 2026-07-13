@@ -16,15 +16,67 @@ def test_sketch_attached_to_generated_geometry_produces_warning() -> None:
             attached_to_generated_geometry=True,
             support_name="Pad001",
             support_kind="generated_geometry",
+            support_subelement="Face3",
+            support_is_stable_reference=False,
+            support_confidence="high",
         )
     ]
 
     warnings = rule_sketch_attached_to_generated_geometry(features)
 
     assert len(warnings) == 1
-    assert warnings[0].severity == "high"
+    assert warnings[0].severity == "medium"
     assert warnings[0].affected_feature_name == "Sketch003"
+    assert warnings[0].message == (
+        "Sketch003 appears to depend on generated geometry from Face3 of Pad001. "
+        "Changes to upstream geometry may invalidate or remap this reference."
+    )
     assert "datum plane" in warnings[0].suggested_practice
+
+
+def test_stable_and_unknown_sketch_supports_do_not_produce_generated_geometry_warning() -> None:
+    features = [
+        FeatureInfo(
+            internal_name="OriginSketch",
+            is_sketch=True,
+            support_name="XY_Plane",
+            support_kind="origin_plane",
+            support_is_stable_reference=True,
+            support_confidence="high",
+        ),
+        FeatureInfo(
+            internal_name="DatumSketch",
+            is_sketch=True,
+            support_name="DatumPlane",
+            support_kind="datum_plane",
+            support_is_stable_reference=True,
+            support_confidence="high",
+        ),
+        FeatureInfo(
+            internal_name="UnknownSketch",
+            is_sketch=True,
+            support_kind="unknown",
+            support_confidence="low",
+        ),
+        FeatureInfo(
+            internal_name="LegacyFlagSketch",
+            is_sketch=True,
+            attached_to_generated_geometry=True,
+            support_name="Pad001",
+            support_kind="unknown",
+            support_confidence="low",
+        ),
+        FeatureInfo(
+            internal_name="UncertainGeneratedSketch",
+            is_sketch=True,
+            support_name="Pad001",
+            support_kind="generated_geometry",
+            support_subelement="Face3",
+            support_confidence="low",
+        ),
+    ]
+
+    assert rule_sketch_attached_to_generated_geometry(features) == []
 
 
 def test_health_score_decreases_for_high_severity_warning() -> None:
@@ -49,6 +101,7 @@ def test_high_downstream_dependency_count_produces_warning() -> None:
         FeatureInfo(
             internal_name="Pad001",
             type_id="PartDesign::Pad",
+            category="additive_feature",
             downstream_dependent_names=[
                 "Pocket001",
                 "Sketch002",
@@ -63,3 +116,38 @@ def test_high_downstream_dependency_count_produces_warning() -> None:
 
     assert len(warnings) == 1
     assert warnings[0].warning_id == "MHA-HIGH-IMPACT-001"
+    assert warnings[0].severity == "low"
+    assert warnings[0].message == (
+        "Pad001 has 5 direct downstream dependents. Changes to this feature may affect a "
+        "large portion of the model."
+    )
+    assert "not evidence" in warnings[0].technical_reason
+
+
+def test_high_downstream_dependency_count_uses_medium_severity_at_double_threshold() -> None:
+    feature = FeatureInfo(
+        internal_name="MasterSketch",
+        category="sketch",
+        is_sketch=True,
+        downstream_dependent_names=[f"Feature{index}" for index in range(10)],
+    )
+
+    warnings = rule_high_downstream_dependency_count([feature])
+
+    assert len(warnings) == 1
+    assert warnings[0].severity == "medium"
+
+
+def test_high_downstream_dependency_count_ignores_nonmeaningful_objects() -> None:
+    container = FeatureInfo(
+        internal_name="Body",
+        category="container",
+        downstream_dependent_names=[f"Feature{index}" for index in range(10)],
+    )
+    reference = FeatureInfo(
+        internal_name="XY_Plane",
+        category="reference_geometry",
+        downstream_dependent_names=[f"Feature{index}" for index in range(10)],
+    )
+
+    assert rule_high_downstream_dependency_count([container, reference]) == []
