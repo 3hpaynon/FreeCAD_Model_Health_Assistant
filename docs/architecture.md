@@ -108,9 +108,30 @@ per-rule caps, affected-feature coverage, total penalty, and final score.
 ### Report Writer
 
 `model_health_assistant.report_writer` writes indented JSON reports to local
-storage. Reports include document name, timestamp, feature counts, sketch counts,
-warning counts, health score, extracted features, warnings, and local-only
-analysis notes.
+storage. Report schema 0.3 adds explicit, machine-readable context while keeping
+the earlier top-level keys for existing consumers:
+
+- `schema_version` identifies the JSON contract independently of the plugin
+  version.
+- `document` holds structured document metadata currently limited to the local
+  FreeCAD document name.
+- `generated_at` is the explicit generation timestamp; the legacy `timestamp`
+  alias remains present.
+- `total_document_object_count` reports every object captured from the FreeCAD
+  document, while `meaningful_modeling_feature_count` reports only additive,
+  subtractive, finishing, and pattern features.
+- `category_counts`, `total_sketch_count`, and
+  `warning_counts_by_severity` make the report summary auditable without
+  reclassifying the feature and warning arrays.
+- Each feature retains its category, direct dependencies and dependents, sketch
+  support details, and confirmed error details. Each warning retains its stable
+  rule ID and severity.
+- `health_score_breakdown` retains the complete deterministic score calculation.
+
+For backward compatibility, `document_name`, `timestamp`, and
+`total_feature_count` remain in schema 0.3. `total_feature_count` is the legacy
+name for the extracted document-object count; new consumers should use
+`total_document_object_count` because its meaning is unambiguous.
 
 ### UI Command
 

@@ -23,6 +23,30 @@ FeatureCategory = Literal[
     "other",
 ]
 
+REPORT_SCHEMA_VERSION = "0.3"
+
+FEATURE_CATEGORY_ORDER: tuple[FeatureCategory, ...] = (
+    "sketch",
+    "additive_feature",
+    "subtractive_feature",
+    "finishing_feature",
+    "pattern_feature",
+    "reference_geometry",
+    "container",
+    "other",
+)
+
+MEANINGFUL_MODELING_CATEGORIES: frozenset[FeatureCategory] = frozenset(
+    {
+        "additive_feature",
+        "subtractive_feature",
+        "finishing_feature",
+        "pattern_feature",
+    }
+)
+
+WARNING_SEVERITY_ORDER: tuple[Severity, ...] = ("low", "medium", "high")
+
 
 @dataclass(slots=True)
 class FeatureInfo:
@@ -137,9 +161,25 @@ class ModelHealthReport:
 
     @property
     def total_feature_count(self) -> int:
-        """Return the number of extracted features."""
+        """Return the legacy count of all extracted document objects."""
+
+        return self.total_document_object_count
+
+    @property
+    def total_document_object_count(self) -> int:
+        """Return the number of document objects captured by the extractor."""
 
         return len(self.features)
+
+    @property
+    def meaningful_modeling_feature_count(self) -> int:
+        """Return the count of features that create or transform model geometry."""
+
+        return sum(
+            1
+            for feature in self.features
+            if feature.category in MEANINGFUL_MODELING_CATEGORIES
+        )
 
     @property
     def total_sketch_count(self) -> int:
@@ -153,15 +193,44 @@ class ModelHealthReport:
 
         return len(self.warnings)
 
+    @property
+    def category_counts(self) -> dict[str, int]:
+        """Return deterministic counts for every supported feature category."""
+
+        counts = {category: 0 for category in FEATURE_CATEGORY_ORDER}
+        for feature in self.features:
+            category = feature.category
+            if category in counts:
+                counts[category] += 1
+            else:
+                counts["other"] += 1
+        return counts
+
+    @property
+    def warning_counts_by_severity(self) -> dict[str, int]:
+        """Return warning counts grouped by severity, including empty groups."""
+
+        counts: dict[str, int] = {severity: 0 for severity in WARNING_SEVERITY_ORDER}
+        for warning in self.warnings:
+            counts[warning.severity] = counts.get(warning.severity, 0) + 1
+        return counts
+
     def to_dict(self) -> dict[str, Any]:
         """Return the report in the JSON shape used by the local writer."""
 
         return {
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "document": {"name": self.document_name},
+            "generated_at": self.generated_at,
             "document_name": self.document_name,
             "timestamp": self.generated_at,
+            "total_document_object_count": self.total_document_object_count,
             "total_feature_count": self.total_feature_count,
+            "meaningful_modeling_feature_count": self.meaningful_modeling_feature_count,
             "total_sketch_count": self.total_sketch_count,
+            "category_counts": self.category_counts,
             "total_warning_count": self.total_warning_count,
+            "warning_counts_by_severity": self.warning_counts_by_severity,
             "health_score": self.health_score,
             "health_score_breakdown": dict(self.health_score_breakdown),
             "features": [feature.to_dict() for feature in self.features],

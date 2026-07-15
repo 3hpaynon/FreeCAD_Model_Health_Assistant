@@ -37,21 +37,74 @@ def test_build_report_path_for_unsaved_document() -> None:
     )
 
 
-def test_report_to_dict_includes_summary_counts() -> None:
+def test_report_to_dict_includes_schema_and_transparent_summary_counts() -> None:
+    categories = (
+        "sketch",
+        "additive_feature",
+        "subtractive_feature",
+        "finishing_feature",
+        "pattern_feature",
+        "reference_geometry",
+        "container",
+        "other",
+    )
+    warnings = [
+        RiskWarning(
+            warning_id=f"TEST-{index}",
+            severity=severity,
+            affected_feature_name="Sketch001",
+            message="Example warning",
+            technical_reason="Example reason",
+            suggested_practice="Example practice",
+            rule_id=f"example_{severity}_rule",
+        )
+        for index, severity in enumerate(("low", "medium", "high"), start=1)
+    ]
     report = ModelHealthReport(
         document_name="Demo",
         generated_at="2026-06-26T00:00:00+00:00",
         health_score=80,
-        features=[FeatureInfo(internal_name="Sketch001", is_sketch=True)],
-        warnings=[],
+        features=[
+            FeatureInfo(
+                internal_name=f"Feature{index}",
+                category=category,
+                is_sketch=category == "sketch",
+            )
+            for index, category in enumerate(categories, start=1)
+        ],
+        warnings=warnings,
     )
 
     data = report_to_dict(report)
 
+    assert data["schema_version"] == "0.3"
+    assert data["document"] == {"name": "Demo"}
+    assert data["generated_at"] == "2026-06-26T00:00:00+00:00"
+
+    # Legacy keys remain available for existing report consumers.
     assert data["document_name"] == "Demo"
-    assert data["total_feature_count"] == 1
+    assert data["timestamp"] == "2026-06-26T00:00:00+00:00"
+    assert data["total_feature_count"] == 8
+
+    assert data["total_document_object_count"] == 8
+    assert data["meaningful_modeling_feature_count"] == 4
     assert data["total_sketch_count"] == 1
-    assert data["total_warning_count"] == 0
+    assert data["category_counts"] == {
+        "sketch": 1,
+        "additive_feature": 1,
+        "subtractive_feature": 1,
+        "finishing_feature": 1,
+        "pattern_feature": 1,
+        "reference_geometry": 1,
+        "container": 1,
+        "other": 1,
+    }
+    assert data["total_warning_count"] == 3
+    assert data["warning_counts_by_severity"] == {
+        "low": 1,
+        "medium": 1,
+        "high": 1,
+    }
     assert data["health_score_breakdown"] == {}
 
 
@@ -69,7 +122,21 @@ def test_save_and_load_report_json(tmp_path) -> None:
         document_name="Demo",
         generated_at="2026-06-26T00:00:00+00:00",
         health_score=90,
-        features=[FeatureInfo(internal_name="Sketch001", is_sketch=True)],
+        features=[
+            FeatureInfo(
+                internal_name="Sketch001",
+                category="sketch",
+                is_sketch=True,
+                dependency_names=["Pad001"],
+                downstream_dependent_names=["Pocket001"],
+                attached_to_generated_geometry=True,
+                support_name="Pad001",
+                support_kind="generated_geometry",
+                support_subelement="Face3",
+                support_is_stable_reference=False,
+                support_confidence="high",
+            )
+        ],
         warnings=[warning],
         notes=["Local-only analysis."],
         health_score_breakdown={"starting_score": 100, "final_score": 90},
@@ -79,9 +146,30 @@ def test_save_and_load_report_json(tmp_path) -> None:
     loaded = load_report_json(output_path)
 
     assert output_path.exists()
+    assert loaded["schema_version"] == "0.3"
+    assert loaded["document"] == {"name": "Demo"}
+    assert loaded["generated_at"] == "2026-06-26T00:00:00+00:00"
     assert loaded["document_name"] == "Demo"
+    assert loaded["timestamp"] == "2026-06-26T00:00:00+00:00"
+    assert loaded["total_document_object_count"] == 1
+    assert loaded["meaningful_modeling_feature_count"] == 0
+    assert loaded["category_counts"]["sketch"] == 1
     assert loaded["total_warning_count"] == 1
+    assert loaded["warning_counts_by_severity"] == {
+        "low": 0,
+        "medium": 1,
+        "high": 0,
+    }
     assert loaded["features"][0]["internal_name"] == "Sketch001"
+    assert loaded["features"][0]["category"] == "sketch"
+    assert loaded["features"][0]["dependency_names"] == ["Pad001"]
+    assert loaded["features"][0]["downstream_dependent_names"] == ["Pocket001"]
+    assert loaded["features"][0]["direct_upstream_count"] == 1
+    assert loaded["features"][0]["direct_downstream_count"] == 1
+    assert loaded["features"][0]["support_name"] == "Pad001"
+    assert loaded["features"][0]["support_kind"] == "generated_geometry"
+    assert loaded["features"][0]["support_subelement"] == "Face3"
+    assert loaded["features"][0]["support_confidence"] == "high"
     assert loaded["warnings"][0]["severity"] == "medium"
     assert loaded["warnings"][0]["rule_id"] == "example_rule"
     assert loaded["health_score_breakdown"] == {

@@ -68,6 +68,16 @@ containers and reference geometry do not inflate model size. Every JSON report
 records the complete score calculation, including raw penalties, caps, affected
 feature coverage, total penalty, and final score.
 
+## JSON Report Schema
+
+Local reports use schema version `0.3`. They identify the document and generation
+time, distinguish all extracted document objects from meaningful modeling
+features, summarize feature categories and warning severities, and retain full
+feature, support, dependency, warning, and score-breakdown details. The legacy
+`document_name`, `timestamp`, and `total_feature_count` keys remain available for
+existing report consumers. Reports contain model facts rather than raw geometry
+and are never uploaded.
+
 ## Development
 
 Install the project in editable mode with test dependencies:
