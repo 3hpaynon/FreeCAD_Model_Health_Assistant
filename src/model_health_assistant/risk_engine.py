@@ -178,28 +178,48 @@ def rule_feature_recompute_error_placeholder(
 
 
 def rule_early_fillet_or_chamfer(features: Sequence[FeatureInfo]) -> list[RiskWarning]:
-    """Warn when a fillet or chamfer appears early and has downstream dependents."""
+    """Warn when meaningful downstream modeling directly depends on a fillet/chamfer."""
 
     warnings: list[RiskWarning] = []
-    if not features:
-        return warnings
+    features_by_name = {
+        feature.internal_name: feature for feature in features if feature.internal_name
+    }
 
-    midpoint = max(1, len(features) // 2)
-    for index, feature in enumerate(features):
+    for feature in features:
         if not _is_fillet_or_chamfer(feature):
             continue
-        if index >= midpoint or not feature.downstream_dependent_names:
+
+        meaningful_downstream_names: list[str] = []
+        for dependent_name in feature.downstream_dependent_names:
+            dependent = features_by_name.get(dependent_name)
+            if (
+                dependent is None
+                or dependent is feature
+                or dependent.category not in _DEPENDENCY_RELEVANT_CATEGORIES
+                or dependent_name in meaningful_downstream_names
+            ):
+                continue
+            meaningful_downstream_names.append(dependent_name)
+
+        downstream_count = len(meaningful_downstream_names)
+        if downstream_count == 0:
             continue
 
+        dependent_label = "feature" if downstream_count == 1 else "features"
         warnings.append(
             RiskWarning(
                 warning_id="MHA-FEATURE-ORDER-001",
                 severity="medium",
                 affected_feature_name=feature.internal_name,
-                message=f"{feature.internal_name} is an early fillet/chamfer with later dependents.",
+                message=(
+                    f"{feature.internal_name} has {downstream_count} direct downstream modeling "
+                    f"{dependent_label}. Early finishing operations can increase fragility when "
+                    "later features depend on modified edge topology."
+                ),
                 technical_reason=(
-                    "Fillets and chamfers often reference generated edges. Placing them early "
-                    "can make many later features depend on unstable topology."
+                    "The dependency graph confirms that later modeling operations directly use "
+                    "this fillet or chamfer. Changes to its generated edges may affect those "
+                    "operations."
                 ),
                 suggested_practice=(
                     "Consider adding fillets and chamfers near the end of the feature tree unless "
@@ -340,7 +360,7 @@ def calculate_health_score(
 
 
 def _is_fillet_or_chamfer(feature: FeatureInfo) -> bool:
-    text = " ".join(
-        [feature.internal_name, feature.label, feature.type_id]
-    ).lower()
-    return "fillet" in text or "chamfer" in text
+    if feature.category != "finishing_feature":
+        return False
+    type_name = feature.type_id.rsplit("::", 1)[-1].lower()
+    return type_name in {"fillet", "chamfer"}

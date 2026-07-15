@@ -2,6 +2,7 @@ from model_health_assistant.models import FeatureInfo, RiskWarning
 from model_health_assistant.risk_engine import (
     calculate_health_score,
     rule_confirmed_feature_error,
+    rule_early_fillet_or_chamfer,
     rule_high_downstream_dependency_count,
     rule_sketch_attached_to_generated_geometry,
 )
@@ -106,6 +107,78 @@ def test_unconfirmed_legacy_error_text_does_not_produce_error_warning() -> None:
     )
 
     assert rule_confirmed_feature_error([feature]) == []
+
+
+def test_fillet_with_meaningful_direct_dependents_produces_warning() -> None:
+    fillet = FeatureInfo(
+        internal_name="Fillet001",
+        type_id="PartDesign::Fillet",
+        category="finishing_feature",
+        downstream_dependent_names=["Body", "Pocket001", "Sketch002", "XY_Plane"],
+    )
+    features = [
+        fillet,
+        FeatureInfo(internal_name="Body", category="container"),
+        FeatureInfo(internal_name="Pocket001", category="subtractive_feature"),
+        FeatureInfo(internal_name="Sketch002", category="sketch", is_sketch=True),
+        FeatureInfo(internal_name="XY_Plane", category="reference_geometry"),
+    ]
+
+    warnings = rule_early_fillet_or_chamfer(features)
+
+    assert len(warnings) == 1
+    assert warnings[0].severity == "medium"
+    assert warnings[0].message == (
+        "Fillet001 has 2 direct downstream modeling features. Early finishing operations can "
+        "increase fragility when later features depend on modified edge topology."
+    )
+
+
+def test_chamfer_with_one_meaningful_direct_dependent_produces_one_warning() -> None:
+    chamfer = FeatureInfo(
+        internal_name="Chamfer001",
+        type_id="PartDesign::Chamfer",
+        category="finishing_feature",
+        downstream_dependent_names=["Pad002", "Pad002"],
+    )
+    pad = FeatureInfo(internal_name="Pad002", category="additive_feature")
+
+    warnings = rule_early_fillet_or_chamfer([chamfer, pad])
+
+    assert len(warnings) == 1
+    assert "1 direct downstream modeling feature." in warnings[0].message
+
+
+def test_fillet_without_meaningful_direct_dependents_does_not_warn() -> None:
+    fillet = FeatureInfo(
+        internal_name="Fillet001",
+        type_id="PartDesign::Fillet",
+        category="finishing_feature",
+        downstream_dependent_names=["Body", "XY_Plane", "MissingFeature"],
+    )
+    body = FeatureInfo(internal_name="Body", category="container")
+    plane = FeatureInfo(internal_name="XY_Plane", category="reference_geometry")
+
+    assert rule_early_fillet_or_chamfer([fillet, body, plane]) == []
+
+
+def test_fillet_name_or_other_finishing_type_does_not_trigger_rule() -> None:
+    named_pad = FeatureInfo(
+        internal_name="FilletLikePad",
+        label="Fillet",
+        type_id="PartDesign::Pad",
+        category="additive_feature",
+        downstream_dependent_names=["Pocket001"],
+    )
+    draft = FeatureInfo(
+        internal_name="Draft001",
+        type_id="PartDesign::Draft",
+        category="finishing_feature",
+        downstream_dependent_names=["Pocket001"],
+    )
+    pocket = FeatureInfo(internal_name="Pocket001", category="subtractive_feature")
+
+    assert rule_early_fillet_or_chamfer([named_pad, draft, pocket]) == []
 
 
 def test_health_score_decreases_for_high_severity_warning() -> None:
