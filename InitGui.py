@@ -114,25 +114,56 @@ class ModelHealthAssistantWorkbench(BaseWorkbench):
                                     report.generated_at,
                                 )
                                 saved_path = save_report_json(report, output_path)
+                                severity_counts = report.warning_counts_by_severity
+                                severity_rank = {"high": 0, "medium": 1, "low": 2}
+                                top_warnings = sorted(
+                                    report.warnings,
+                                    key=lambda warning: severity_rank.get(
+                                        warning.severity,
+                                        3,
+                                    ),
+                                )[:3]
+                                top_issues = "\n".join(
+                                    str(index) + ". " + warning.message
+                                    for index, warning in enumerate(top_warnings, start=1)
+                                )
+                                if not top_issues:
+                                    top_issues = "None."
                                 message = (
                                     "------------------------------------------------------------------------------------\n"
                                     + "Model Health Assistant Analysis\n\n"
                                     + "Document: "
                                     + report.document_name
                                     + "\n"
-                                    + "Features: "
-                                    + str(report.total_feature_count)
+                                    + "Document objects: "
+                                    + str(report.total_document_object_count)
+                                    + "\n"
+                                    + "Meaningful modeling features: "
+                                    + str(report.meaningful_modeling_feature_count)
                                     + "\n"
                                     + "Sketches: "
                                     + str(report.total_sketch_count)
+                                    + "\n\n"
+                                    + "Warnings:\n"
+                                    + "High: "
+                                    + str(severity_counts["high"])
                                     + "\n"
-                                    + "Warnings: "
+                                    + "Medium: "
+                                    + str(severity_counts["medium"])
+                                    + "\n"
+                                    + "Low: "
+                                    + str(severity_counts["low"])
+                                    + "\n"
+                                    + "Total: "
                                     + str(report.total_warning_count)
-                                    + "\n"
+                                    + "\n\n"
                                     + "Health score: "
                                     + str(report.health_score)
-                                    + "/100\n"
-                                    + "Report saved to:\n"
+                                    + "/100\n\n"
+                                    + "Top issues:\n\n"
+                                    + top_issues
+                                    + "\n\n"
+                                    + "Report:\n"
                                     + str(saved_path)
                                     + "\n"
                                     + "------------------------------------------------------------------------------------\n"

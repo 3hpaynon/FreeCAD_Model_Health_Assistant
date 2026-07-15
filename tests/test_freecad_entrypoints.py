@@ -187,11 +187,18 @@ def test_test_command_prints_active_document_name(monkeypatch, tmp_path) -> None
         "------------------------------------------------------------------------------------\n"
         "Model Health Assistant Analysis\n\n"
         "Document: Mechanical-EM Coupler Clutch Practice Model\n"
-        "Features: 0\n"
-        "Sketches: 0\n"
-        "Warnings: 0\n"
-        "Health score: 100/100\n"
-        "Report saved to:\n"
+        "Document objects: 0\n"
+        "Meaningful modeling features: 0\n"
+        "Sketches: 0\n\n"
+        "Warnings:\n"
+        "High: 0\n"
+        "Medium: 0\n"
+        "Low: 0\n"
+        "Total: 0\n\n"
+        "Health score: 100/100\n\n"
+        "Top issues:\n\n"
+        "None.\n\n"
+        "Report:\n"
         + str(output_path)
         + "\n------------------------------------------------------------------------------------\n"
     ]
@@ -245,11 +252,120 @@ def test_test_command_prints_extracted_feature_and_sketch_counts(monkeypatch, tm
         "------------------------------------------------------------------------------------\n"
         "Model Health Assistant Analysis\n\n"
         "Document: Demo Model\n"
-        "Features: 2\n"
-        "Sketches: 1\n"
-        "Warnings: 1\n"
-        "Health score: 100/100\n"
-        "Report saved to:\n"
+        "Document objects: 2\n"
+        "Meaningful modeling features: 1\n"
+        "Sketches: 1\n\n"
+        "Warnings:\n"
+        "High: 0\n"
+        "Medium: 0\n"
+        "Low: 1\n"
+        "Total: 1\n\n"
+        "Health score: 100/100\n\n"
+        "Top issues:\n\n"
+        "1. Sketch has missing or unknown support information.\n\n"
+        "Report:\n"
+        + str(output_path)
+        + "\n------------------------------------------------------------------------------------\n"
+    ]
+    assert output_path.exists()
+
+
+def test_test_command_prints_top_issues_in_severity_order(monkeypatch, tmp_path) -> None:
+    messages = []
+    fake_app = types.ModuleType("FreeCAD")
+    fake_gui = types.ModuleType("FreeCADGui")
+    fake_gui.commands = {}
+    fake_gui.addCommand = lambda name, command: fake_gui.commands.update({name: command})
+    fake_gui.addWorkbench = lambda workbench: None
+
+    class FakeConsole:
+        @staticmethod
+        def PrintMessage(message: str) -> None:  # noqa: N802 - FreeCAD API name.
+            messages.append(message)
+
+    fake_app.Console = FakeConsole
+    fake_app.ActiveDocument = types.SimpleNamespace(
+        Name="Ranked_Model",
+        Label="Ranked Model",
+        Objects=[],
+    )
+
+    monkeypatch.setitem(sys.modules, "FreeCAD", fake_app)
+    monkeypatch.setitem(sys.modules, "FreeCADGui", fake_gui)
+
+    from model_health_assistant import report_writer, risk_engine
+    from model_health_assistant.models import FeatureInfo, ModelHealthReport, RiskWarning
+
+    warnings = [
+        RiskWarning(
+            warning_id=f"TEST-{index}",
+            severity=severity,
+            affected_feature_name="Feature001",
+            message=message,
+            technical_reason="Example reason",
+            suggested_practice="Example practice",
+            rule_id=f"example_rule_{index}",
+        )
+        for index, (severity, message) in enumerate(
+            (
+                ("low", "Low issue first in source order."),
+                ("high", "High issue."),
+                ("medium", "Medium issue."),
+                ("low", "Fourth issue should not appear."),
+            ),
+            start=1,
+        )
+    ]
+    report = ModelHealthReport(
+        document_name="Ranked Model",
+        generated_at="2026-07-15T06:45:00+00:00",
+        health_score=64,
+        features=[
+            FeatureInfo(internal_name="Body", category="container"),
+            FeatureInfo(internal_name="Sketch", category="sketch", is_sketch=True),
+            FeatureInfo(internal_name="Pad", category="additive_feature"),
+        ],
+        warnings=warnings,
+    )
+    monkeypatch.setattr(
+        risk_engine,
+        "analyze_model_health",
+        lambda features, document_name: report,
+    )
+
+    output_path = tmp_path / "model_health_reports" / "ranked_model_report.json"
+    monkeypatch.setattr(
+        report_writer,
+        "build_report_path",
+        lambda document_name, document_file_name, generated_at: output_path,
+    )
+
+    module = _load_module("mha_test_init_gui_ranked_issues", REPO_ROOT / "InitGui.py")
+    workbench = module.ModelHealthAssistantWorkbench()
+    workbench.Initialize()
+    command = fake_gui.commands["MHA_TestCommand"]
+    messages.clear()
+
+    command.Activated()
+
+    assert messages == [
+        "------------------------------------------------------------------------------------\n"
+        "Model Health Assistant Analysis\n\n"
+        "Document: Ranked Model\n"
+        "Document objects: 3\n"
+        "Meaningful modeling features: 1\n"
+        "Sketches: 1\n\n"
+        "Warnings:\n"
+        "High: 1\n"
+        "Medium: 1\n"
+        "Low: 2\n"
+        "Total: 4\n\n"
+        "Health score: 64/100\n\n"
+        "Top issues:\n\n"
+        "1. High issue.\n"
+        "2. Medium issue.\n"
+        "3. Low issue first in source order.\n\n"
+        "Report:\n"
         + str(output_path)
         + "\n------------------------------------------------------------------------------------\n"
     ]
