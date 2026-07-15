@@ -114,6 +114,7 @@ class RiskWarning:
     technical_reason: str
     suggested_practice: str
     rule_name: str = ""
+    rule_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly dictionary."""

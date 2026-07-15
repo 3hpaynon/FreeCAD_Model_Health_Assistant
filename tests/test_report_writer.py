@@ -62,6 +62,7 @@ def test_save_and_load_report_json(tmp_path) -> None:
         message="Example warning",
         technical_reason="Example reason",
         suggested_practice="Example practice",
+        rule_id="example_rule",
     )
     report = ModelHealthReport(
         document_name="Demo",
@@ -80,3 +81,4 @@ def test_save_and_load_report_json(tmp_path) -> None:
     assert loaded["total_warning_count"] == 1
     assert loaded["features"][0]["internal_name"] == "Sketch001"
     assert loaded["warnings"][0]["severity"] == "medium"
+    assert loaded["warnings"][0]["rule_id"] == "example_rule"

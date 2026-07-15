@@ -1,6 +1,7 @@
 from model_health_assistant.models import FeatureInfo, RiskWarning
 from model_health_assistant.risk_engine import (
     calculate_health_score,
+    run_all_rules,
     rule_confirmed_feature_error,
     rule_early_fillet_or_chamfer,
     rule_high_downstream_dependency_count,
@@ -29,6 +30,7 @@ def test_sketch_attached_to_generated_geometry_produces_warning() -> None:
     assert len(warnings) == 1
     assert warnings[0].severity == "medium"
     assert warnings[0].affected_feature_name == "Sketch003"
+    assert warnings[0].rule_id == "sketch_generated_geometry_support"
     assert warnings[0].message == (
         "Sketch003 appears to depend on generated geometry from Face3 of Pad001. "
         "Changes to upstream geometry may invalidate or remap this reference."
@@ -96,6 +98,7 @@ def test_confirmed_feature_error_produces_high_severity_warning() -> None:
         "Pocket001 reports a confirmed FreeCAD error: State: Invalid"
     )
     assert warnings[0].rule_name == "rule_confirmed_feature_error"
+    assert warnings[0].rule_id == "confirmed_recompute_error"
 
 
 def test_unconfirmed_legacy_error_text_does_not_produce_error_warning() -> None:
@@ -128,6 +131,7 @@ def test_fillet_with_meaningful_direct_dependents_produces_warning() -> None:
 
     assert len(warnings) == 1
     assert warnings[0].severity == "medium"
+    assert warnings[0].rule_id == "early_finishing_feature"
     assert warnings[0].message == (
         "Fillet001 has 2 direct downstream modeling features. Early finishing operations can "
         "increase fragility when later features depend on modified edge topology."
@@ -218,6 +222,7 @@ def test_high_downstream_dependency_count_produces_warning() -> None:
 
     assert len(warnings) == 1
     assert warnings[0].warning_id == "MHA-HIGH-IMPACT-001"
+    assert warnings[0].rule_id == "high_downstream_dependency_count"
     assert warnings[0].severity == "low"
     assert warnings[0].message == (
         "Pad001 has 5 direct downstream dependents. Changes to this feature may affect a "
@@ -253,3 +258,26 @@ def test_high_downstream_dependency_count_ignores_nonmeaningful_objects() -> Non
     )
 
     assert rule_high_downstream_dependency_count([container, reference]) == []
+
+
+def test_run_all_rules_deduplicates_same_rule_but_preserves_different_rules() -> None:
+    feature = FeatureInfo(
+        internal_name="Sketch003",
+        type_id="Sketcher::SketchObject",
+        category="sketch",
+        is_sketch=True,
+        support_name="Pad001",
+        support_kind="generated_geometry",
+        support_subelement="Face3",
+        support_confidence="high",
+        has_confirmed_error=True,
+        error_details=["State: Invalid"],
+    )
+
+    warnings = run_all_rules([feature, feature])
+
+    assert [warning.rule_id for warning in warnings] == [
+        "sketch_generated_geometry_support",
+        "confirmed_recompute_error",
+    ]
+    assert all(warning.affected_feature_name == "Sketch003" for warning in warnings)

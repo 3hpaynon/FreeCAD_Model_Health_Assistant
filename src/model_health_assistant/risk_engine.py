@@ -59,7 +59,24 @@ def run_all_rules(features: Sequence[FeatureInfo]) -> list[RiskWarning]:
     warnings: list[RiskWarning] = []
     for rule in rules:
         warnings.extend(rule(features))
-    return warnings
+    return deduplicate_warnings(warnings)
+
+
+def deduplicate_warnings(warnings: Sequence[RiskWarning]) -> list[RiskWarning]:
+    """Keep the first warning for each stable rule ID and affected feature."""
+
+    unique_warnings: list[RiskWarning] = []
+    seen: set[tuple[str, str]] = set()
+    for warning in warnings:
+        rule_identity = (
+            warning.rule_id or warning.warning_id or warning.rule_name or warning.message
+        )
+        identity = (rule_identity, warning.affected_feature_name)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique_warnings.append(warning)
+    return unique_warnings
 
 
 def rule_sketch_attached_to_generated_geometry(
@@ -100,6 +117,7 @@ def rule_sketch_attached_to_generated_geometry(
                     "instead of generated model geometry."
                 ),
                 rule_name="rule_sketch_attached_to_generated_geometry",
+                rule_id="sketch_generated_geometry_support",
             )
         )
     return warnings
@@ -133,6 +151,7 @@ def rule_underdefined_sketch_placeholder(features: Sequence[FeatureInfo]) -> lis
                         "geometric constraints."
                     ),
                     rule_name="rule_underdefined_sketch_placeholder",
+                    rule_id="underdefined_sketch",
                 )
             )
     return warnings
@@ -164,6 +183,7 @@ def rule_confirmed_feature_error(features: Sequence[FeatureInfo]) -> list[RiskWa
                     "later operations."
                 ),
                 rule_name="rule_confirmed_feature_error",
+                rule_id="confirmed_recompute_error",
             )
         )
     return warnings
@@ -226,6 +246,7 @@ def rule_early_fillet_or_chamfer(features: Sequence[FeatureInfo]) -> list[RiskWa
                     "they are part of the core design intent."
                 ),
                 rule_name="rule_early_fillet_or_chamfer",
+                rule_id="early_finishing_feature",
             )
         )
     return warnings
@@ -266,6 +287,7 @@ def rule_high_downstream_dependency_count(
                     "intent and references clear and stable."
                 ),
                 rule_name="rule_high_downstream_dependency_count",
+                rule_id="high_downstream_dependency_count",
             )
         )
     return warnings
@@ -301,6 +323,7 @@ def rule_missing_sketch_support(features: Sequence[FeatureInfo]) -> list[RiskWar
                     "for important references."
                 ),
                 rule_name="rule_missing_sketch_support",
+                rule_id="unknown_sketch_support",
             )
         )
     return warnings
@@ -340,6 +363,7 @@ def rule_hardcoded_repeated_dimensions_placeholder(
                     "for repeated design values."
                 ),
                 rule_name="rule_hardcoded_repeated_dimensions_placeholder",
+                rule_id="hardcoded_repeated_dimensions",
             )
         )
     return warnings
