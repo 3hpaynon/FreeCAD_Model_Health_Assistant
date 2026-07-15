@@ -52,6 +52,7 @@ def test_report_to_dict_includes_summary_counts() -> None:
     assert data["total_feature_count"] == 1
     assert data["total_sketch_count"] == 1
     assert data["total_warning_count"] == 0
+    assert data["health_score_breakdown"] == {}
 
 
 def test_save_and_load_report_json(tmp_path) -> None:
@@ -71,6 +72,7 @@ def test_save_and_load_report_json(tmp_path) -> None:
         features=[FeatureInfo(internal_name="Sketch001", is_sketch=True)],
         warnings=[warning],
         notes=["Local-only analysis."],
+        health_score_breakdown={"starting_score": 100, "final_score": 90},
     )
 
     output_path = save_report_json(report, tmp_path / "report.json")
@@ -82,3 +84,7 @@ def test_save_and_load_report_json(tmp_path) -> None:
     assert loaded["features"][0]["internal_name"] == "Sketch001"
     assert loaded["warnings"][0]["severity"] == "medium"
     assert loaded["warnings"][0]["rule_id"] == "example_rule"
+    assert loaded["health_score_breakdown"] == {
+        "starting_score": 100,
+        "final_score": 90,
+    }

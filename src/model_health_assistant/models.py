@@ -133,6 +133,7 @@ class ModelHealthReport:
     warnings: list[RiskWarning] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    health_score_breakdown: dict[str, Any] = field(default_factory=dict)
 
     @property
     def total_feature_count(self) -> int:
@@ -162,6 +163,7 @@ class ModelHealthReport:
             "total_sketch_count": self.total_sketch_count,
             "total_warning_count": self.total_warning_count,
             "health_score": self.health_score,
+            "health_score_breakdown": dict(self.health_score_breakdown),
             "features": [feature.to_dict() for feature in self.features],
             "warnings": [warning.to_dict() for warning in self.warnings],
             "notes": list(self.notes),

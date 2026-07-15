@@ -1,6 +1,8 @@
 from model_health_assistant.models import FeatureInfo, RiskWarning
 from model_health_assistant.risk_engine import (
+    analyze_model_health,
     calculate_health_score,
+    calculate_health_score_breakdown,
     run_all_rules,
     rule_confirmed_feature_error,
     rule_early_fillet_or_chamfer,
@@ -186,20 +188,148 @@ def test_fillet_name_or_other_finishing_type_does_not_trigger_rule() -> None:
 
 
 def test_health_score_decreases_for_high_severity_warning() -> None:
-    features = [FeatureInfo(internal_name="Sketch001", is_sketch=True)]
+    features = [
+        FeatureInfo(
+            internal_name="Pocket001",
+            category="subtractive_feature",
+        )
+    ]
     warnings = [
         RiskWarning(
             warning_id="TEST-001",
             severity="high",
-            affected_feature_name="Sketch001",
+            affected_feature_name="Pocket001",
             message="Test warning",
             technical_reason="Testing high severity penalty.",
             suggested_practice="Fix the modeled issue.",
+            rule_id="confirmed_recompute_error",
         )
     ]
 
     assert calculate_health_score(features, []) == 100
     assert calculate_health_score(features, warnings) < 100
+
+
+def test_health_score_matches_approved_model_size_examples() -> None:
+    expected_scores = {5: 58, 50: 67, 500: 68}
+
+    for feature_count, expected_score in expected_scores.items():
+        features = [
+            FeatureInfo(
+                internal_name=f"Sketch{index}",
+                category="sketch",
+                is_sketch=True,
+            )
+            for index in range(feature_count)
+        ]
+        warnings = [
+            RiskWarning(
+                warning_id="MHA-SKETCH-SUPPORT-001",
+                severity="medium",
+                affected_feature_name=f"Sketch{index}",
+                message="Generated support warning",
+                technical_reason="Generated topology dependency.",
+                suggested_practice="Use a stable reference.",
+                rule_id="sketch_generated_geometry_support",
+            )
+            for index in range(5)
+        ]
+
+        breakdown = calculate_health_score_breakdown(features, warnings)
+
+        assert breakdown["rule_penalty_totals"] == [
+            {
+                "rule_id": "sketch_generated_geometry_support",
+                "raw_penalty": 40,
+                "cap": 32,
+                "applied_penalty": 32,
+            }
+        ]
+        assert breakdown["final_score"] == expected_score
+        assert calculate_health_score(features, warnings) == expected_score
+
+
+def test_confirmed_error_penalties_are_uncapped_and_score_is_clamped() -> None:
+    features = [
+        FeatureInfo(
+            internal_name=f"Pocket{index}",
+            category="subtractive_feature",
+        )
+        for index in range(4)
+    ]
+    warnings = [
+        RiskWarning(
+            warning_id="MHA-FEATURE-ERROR-001",
+            severity="high",
+            affected_feature_name=feature.internal_name,
+            message="Confirmed error",
+            technical_reason="Confirmed FreeCAD failure.",
+            suggested_practice="Repair the feature.",
+            rule_id="confirmed_recompute_error",
+        )
+        for feature in features
+    ]
+
+    breakdown = calculate_health_score_breakdown(features, warnings)
+
+    assert breakdown["rule_penalty_totals"] == [
+        {
+            "rule_id": "confirmed_recompute_error",
+            "raw_penalty": 100,
+            "cap": None,
+            "applied_penalty": 100,
+        }
+    ]
+    assert breakdown["prevalence_penalty"] == 10
+    assert breakdown["total_penalty"] == 110
+    assert breakdown["final_score"] == 0
+
+
+def test_informational_and_unknown_rules_do_not_reduce_score() -> None:
+    features = [
+        FeatureInfo(internal_name="Sketch001", category="sketch", is_sketch=True)
+    ]
+    warnings = [
+        RiskWarning(
+            warning_id="MHA-SKETCH-SUPPORT-UNKNOWN-001",
+            severity="low",
+            affected_feature_name="Sketch001",
+            message="Unknown support",
+            technical_reason="Support could not be determined.",
+            suggested_practice="Inspect the sketch.",
+            rule_id="unknown_sketch_support",
+        ),
+        RiskWarning(
+            warning_id="FUTURE-001",
+            severity="high",
+            affected_feature_name="Sketch001",
+            message="Future warning",
+            technical_reason="No reviewed score weight exists.",
+            suggested_practice="Review manually.",
+            rule_id="future_unreviewed_rule",
+        ),
+    ]
+
+    breakdown = calculate_health_score_breakdown(features, warnings)
+
+    assert [entry["raw_penalty"] for entry in breakdown["warning_penalties"]] == [0, 0]
+    assert breakdown["affected_feature_count"] == 0
+    assert breakdown["final_score"] == 100
+
+
+def test_analyze_model_health_includes_matching_score_breakdown() -> None:
+    feature = FeatureInfo(
+        internal_name="Pocket001",
+        category="subtractive_feature",
+        has_confirmed_error=True,
+        error_details=["State: Invalid"],
+    )
+
+    report = analyze_model_health([feature], document_name="Demo")
+
+    assert report.health_score == report.health_score_breakdown["final_score"]
+    assert report.health_score_breakdown["formula_version"] == "1.0"
+    assert report.health_score_breakdown["starting_score"] == 100
 
 
 def test_high_downstream_dependency_count_produces_warning() -> None:

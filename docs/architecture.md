@@ -66,6 +66,45 @@ includes rules for:
 
 The risk engine does not use AI, machine learning, cloud calls, or servers.
 
+### Health Score
+
+The health score is a versioned deterministic heuristic. Formula version 1.0
+starts at 100 and applies the following reviewed penalties after warning
+deduplication:
+
+| Rule ID | Penalty per affected feature | Rule cap |
+| --- | ---: | ---: |
+| `confirmed_recompute_error` | 25 | none |
+| `sketch_generated_geometry_support` | 8 | 32 |
+| `early_finishing_feature` | 5 | 20 |
+| `underdefined_sketch` | 4 | 20 |
+| `high_downstream_dependency_count` | 2 low / 4 medium | 16 |
+| `unknown_sketch_support` | 0 | 0 |
+| `hardcoded_repeated_dimensions` | 0 | 0 |
+
+Unrecognized future rules receive zero points until an explicit weight is
+reviewed. This prevents a new warning from silently changing score semantics.
+
+Let `N` be the number of sketches plus additive, subtractive, finishing, and
+pattern features. Let `A` be the number of unique features affected by rules
+with nonzero penalties. The bounded prevalence penalty is:
+
+```text
+min(10, floor((10 * A / max(1, N)) + 0.5))
+```
+
+The final score is:
+
+```text
+clamp(100 - applied rule penalties - prevalence penalty, 0, 100)
+```
+
+Fixed rule penalties ensure confirmed errors are not diluted in large models.
+The bounded prevalence term makes widespread issues matter more in small models
+without allowing model size to dominate. Reports preserve the complete
+calculation under `health_score_breakdown`, including per-warning raw penalties,
+per-rule caps, affected-feature coverage, total penalty, and final score.
+
 ### Report Writer
 
 `model_health_assistant.report_writer` writes indented JSON reports to local

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
+from typing import Any
 
 from model_health_assistant import __version__
 from model_health_assistant.models import FeatureInfo, ModelHealthReport, RiskWarning
@@ -18,6 +19,35 @@ _DEPENDENCY_RELEVANT_CATEGORIES = {
     "pattern_feature",
 }
 
+_FIXED_RULE_PENALTIES = {
+    "confirmed_recompute_error": 25,
+    "sketch_generated_geometry_support": 8,
+    "early_finishing_feature": 5,
+    "underdefined_sketch": 4,
+    "unknown_sketch_support": 0,
+    "hardcoded_repeated_dimensions": 0,
+}
+_RULE_PENALTY_CAPS: dict[str, int | None] = {
+    "confirmed_recompute_error": None,
+    "sketch_generated_geometry_support": 32,
+    "early_finishing_feature": 20,
+    "underdefined_sketch": 20,
+    "high_downstream_dependency_count": 16,
+    "unknown_sketch_support": 0,
+    "hardcoded_repeated_dimensions": 0,
+}
+_RULE_PENALTY_REASONS = {
+    "confirmed_recompute_error": (
+        "Confirmed FreeCAD failure; its base penalty is uncapped and never diluted by model size."
+    ),
+    "sketch_generated_geometry_support": "High-confidence generated-topology dependency.",
+    "early_finishing_feature": "Graph-confirmed early finishing-operation caution.",
+    "underdefined_sketch": "Sketch metadata indicates possible parametric instability.",
+    "high_downstream_dependency_count": "Dependency centrality; impact information only.",
+    "unknown_sketch_support": "Informational only because support evidence is insufficient.",
+    "hardcoded_repeated_dimensions": "Unscored while the rule remains placeholder-only.",
+}
+
 
 def analyze_model_health(
     features: Sequence[FeatureInfo],
@@ -27,7 +57,8 @@ def analyze_model_health(
 
     feature_list = list(features)
     warnings = run_all_rules(feature_list)
-    score = calculate_health_score(feature_list, warnings)
+    score_breakdown = calculate_health_score_breakdown(feature_list, warnings)
+    score = int(score_breakdown["final_score"])
 
     return ModelHealthReport(
         document_name=document_name,
@@ -35,6 +66,7 @@ def analyze_model_health(
         health_score=score,
         features=feature_list,
         warnings=warnings,
+        health_score_breakdown=score_breakdown,
         notes=[
             "Local-only analysis. No CAD data was uploaded.",
             "Deterministic rules only; no AI or machine learning was used.",
@@ -373,14 +405,101 @@ def calculate_health_score(
     features: Sequence[FeatureInfo],
     warnings: Sequence[RiskWarning],
 ) -> int:
-    """Calculate a simple 0-100 health score from warning severity."""
+    """Calculate the approved transparent 0-100 rule-based health score."""
 
-    if not features and not warnings:
-        return 100
+    return int(calculate_health_score_breakdown(features, warnings)["final_score"])
 
-    penalties = {"low": 5, "medium": 10, "high": 20}
-    total_penalty = sum(penalties[warning.severity] for warning in warnings)
-    return max(0, min(100, 100 - total_penalty))
+
+def calculate_health_score_breakdown(
+    features: Sequence[FeatureInfo],
+    warnings: Sequence[RiskWarning],
+) -> dict[str, Any]:
+    """Return every component used by the approved health-score formula."""
+
+    feature_list = list(features)
+    warning_list = deduplicate_warnings(warnings)
+    warning_penalties: list[dict[str, Any]] = []
+    raw_totals_by_rule: dict[str, int] = {}
+
+    for warning in warning_list:
+        rule_id = warning.rule_id or "unidentified_rule"
+        raw_penalty = _raw_warning_penalty(warning)
+        raw_totals_by_rule[rule_id] = raw_totals_by_rule.get(rule_id, 0) + raw_penalty
+        warning_penalties.append(
+            {
+                "rule_id": rule_id,
+                "warning_id": warning.warning_id,
+                "affected_feature_name": warning.affected_feature_name,
+                "severity": warning.severity,
+                "raw_penalty": raw_penalty,
+                "reason": _RULE_PENALTY_REASONS.get(
+                    rule_id,
+                    "Unrecognized rules are unscored until assigned a reviewed weight.",
+                ),
+            }
+        )
+
+    rule_penalty_totals: list[dict[str, Any]] = []
+    applied_rule_penalty = 0
+    for rule_id, raw_penalty in raw_totals_by_rule.items():
+        cap = _RULE_PENALTY_CAPS.get(rule_id)
+        applied_penalty = raw_penalty if cap is None else min(raw_penalty, cap)
+        applied_rule_penalty += applied_penalty
+        rule_penalty_totals.append(
+            {
+                "rule_id": rule_id,
+                "raw_penalty": raw_penalty,
+                "cap": cap,
+                "applied_penalty": applied_penalty,
+            }
+        )
+
+    analyzable_features = [
+        feature
+        for feature in feature_list
+        if feature.category in _DEPENDENCY_RELEVANT_CATEGORIES
+    ]
+    analyzable_names = {
+        feature.internal_name for feature in analyzable_features if feature.internal_name
+    }
+    affected_names = {
+        entry["affected_feature_name"]
+        for entry in warning_penalties
+        if entry["raw_penalty"] > 0 and entry["affected_feature_name"] in analyzable_names
+    }
+    analyzable_count = len(analyzable_features)
+    affected_count = len(affected_names)
+    prevalence_ratio = affected_count / max(1, analyzable_count)
+    prevalence_penalty = min(10, int((10 * prevalence_ratio) + 0.5))
+
+    starting_score = 100
+    total_penalty = applied_rule_penalty + prevalence_penalty
+    final_score = max(0, min(100, starting_score - total_penalty))
+
+    return {
+        "formula_version": "1.0",
+        "method": "rule_weighted_with_bounded_prevalence",
+        "starting_score": starting_score,
+        "warning_penalties": warning_penalties,
+        "rule_penalty_totals": rule_penalty_totals,
+        "analyzable_feature_count": analyzable_count,
+        "affected_feature_count": affected_count,
+        "prevalence_ratio": round(prevalence_ratio, 6),
+        "prevalence_penalty": prevalence_penalty,
+        "total_penalty": total_penalty,
+        "final_score": final_score,
+        "notes": [
+            "Deterministic heuristic; not a statistical prediction.",
+            "Containers, reference geometry, and other objects are excluded from prevalence.",
+            "Unrecognized and explicitly informational rules receive zero points.",
+        ],
+    }
+
+
+def _raw_warning_penalty(warning: RiskWarning) -> int:
+    if warning.rule_id == "high_downstream_dependency_count":
+        return 4 if warning.severity in {"medium", "high"} else 2
+    return _FIXED_RULE_PENALTIES.get(warning.rule_id, 0)
 
 
 def _is_fillet_or_chamfer(feature: FeatureInfo) -> bool:

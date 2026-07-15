@@ -248,7 +248,7 @@ def test_test_command_prints_extracted_feature_and_sketch_counts(monkeypatch, tm
         "Features: 2\n"
         "Sketches: 1\n"
         "Warnings: 1\n"
-        "Health score: 95/100\n"
+        "Health score: 100/100\n"
         "Report saved to:\n"
         + str(output_path)
         + "\n------------------------------------------------------------------------------------\n"

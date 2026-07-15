@@ -50,6 +50,24 @@ FreeCAD document
 -> FreeCAD UI summary
 ```
 
+## Model Health Score
+
+The score is a transparent deterministic heuristic, not a statistical
+prediction. It starts at 100, subtracts reviewed rule-specific penalties, adds a
+bounded 0-10 prevalence penalty, and is clamped to the range 0-100.
+
+Confirmed FreeCAD errors subtract 25 points each without a cap. Generated-face
+sketch dependencies subtract 8 points each (capped at 32), early fillet/chamfer
+dependencies subtract 5 (capped at 20), underdefined sketches subtract 4
+(capped at 20), and high downstream dependency counts subtract 2 or 4 based on
+severity (capped at 16). Unknown sketch support, placeholder dimension warnings,
+and unreviewed future rules are informational and subtract zero points.
+
+The prevalence adjustment uses only sketches and meaningful modeling features;
+containers and reference geometry do not inflate model size. Every JSON report
+records the complete score calculation, including raw penalties, caps, affected
+feature coverage, total penalty, and final score.
+
 ## Development
 
 Install the project in editable mode with test dependencies:
