@@ -39,6 +39,13 @@ _HEALTH_SCORE_DISCLAIMER = (
     "The health score is a rule-based engineering aid and does not guarantee "
     "that the model is error-free."
 )
+AI_CONTEXT_PREVIEW_NOTICE = (
+    "Local preview only. No data has been sent to an AI provider."
+)
+MOCK_EXPLANATION_NOTICE = (
+    "This explanation was produced by a deterministic local test provider. "
+    "No AI model or network service was used."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +56,32 @@ class _AnalyzedDocumentContext:
     document_name: str
     app_module: Any
     gui_module: Any
+
+
+class _ReadOnlyTextDialogController:
+    """Update and foreground one reusable read-only child dialog."""
+
+    def __init__(self, dialog: Any, text_view: Any) -> None:
+        self.dialog = dialog
+        self.text_view = text_view
+
+    def update_text(self, text: str) -> None:
+        set_plain_text = getattr(self.text_view, "setPlainText", None)
+        if callable(set_plain_text):
+            set_plain_text(text)
+            return
+        set_text = getattr(self.text_view, "setText", None)
+        if callable(set_text):
+            set_text(text)
+
+    def show(self) -> None:
+        self.dialog.show()
+        raise_dialog = getattr(self.dialog, "raise_", None)
+        if callable(raise_dialog):
+            raise_dialog()
+        activate_window = getattr(self.dialog, "activateWindow", None)
+        if callable(activate_window):
+            activate_window()
 
 
 class AnalyzeFeatureTreeCommand:
@@ -100,6 +133,10 @@ class _ResultsDialogController:
         report_action_error_handler: Any | None = None,
         refresh_analysis_button: Any | None = None,
         status_label: Any | None = None,
+        preview_ai_context_button: Any | None = None,
+        preview_ai_context_handler: Any | None = None,
+        test_mock_explanation_button: Any | None = None,
+        test_mock_explanation_handler: Any | None = None,
     ) -> None:
         self.dialog = dialog
         self.value_labels = value_labels
@@ -117,20 +154,27 @@ class _ResultsDialogController:
         self.report_action_error_handler = report_action_error_handler
         self.refresh_analysis_button = refresh_analysis_button
         self.status_label = status_label
+        self.preview_ai_context_button = preview_ai_context_button
+        self.preview_ai_context_handler = preview_ai_context_handler
+        self.test_mock_explanation_button = test_mock_explanation_button
+        self.test_mock_explanation_handler = test_mock_explanation_handler
         self.warning_items: tuple[WarningDisplayItem, ...] = ()
         self.document_context: _AnalyzedDocumentContext | None = None
         self.report_path: Path | None = None
+        self.report: ModelHealthReport | None = None
 
     def update_presentation(
         self,
         presentation: AnalysisPresentation,
         *,
+        report: ModelHealthReport | None = None,
         document_context: _AnalyzedDocumentContext | None = None,
         status_message: str = "",
     ) -> None:
         """Replace every displayed summary value."""
 
         self.document_context = document_context
+        self.report = report
         for key, text in _summary_display_values(presentation).items():
             label = self.value_labels.get(key)
             set_text = getattr(label, "setText", None)
@@ -139,6 +183,8 @@ class _ResultsDialogController:
         self.report_path = presentation.report_path
         _, report_path_error = _validated_report_path(self.report_path)
         self._set_report_actions_enabled(report_path_error is None)
+        self._set_preview_ai_context_enabled(report is not None)
+        self._set_test_mock_explanation_enabled(report is not None)
         self.update_status(status_message)
         self._update_warning_table(presentation)
 
@@ -274,6 +320,66 @@ class _ResultsDialogController:
             is not None
         )
 
+    def preview_ai_context(self, *_args: Any) -> bool:
+        """Display the privacy-safe context for the already completed report."""
+
+        if self.report is None:
+            self._set_preview_ai_context_enabled(False)
+            self.update_status("AI context preview failed: No completed report is available.")
+            return False
+        if not callable(self.preview_ai_context_handler):
+            self._set_preview_ai_context_enabled(False)
+            self.update_status(
+                "AI context preview failed: Preview is unavailable in this Qt runtime."
+            )
+            return False
+        try:
+            error = self.preview_ai_context_handler(self.report)
+        except Exception as exc:
+            error = (
+                "The local preview failed safely: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        if error is not None:
+            self.update_status(f"AI context preview failed: {error}")
+            return False
+
+        self.update_status("Opened local AI context preview. No data was transmitted.")
+        return True
+
+    def test_mock_explanation(self, *_args: Any) -> bool:
+        """Explain the retained report with the deterministic local provider."""
+
+        if self.report is None:
+            self._set_test_mock_explanation_enabled(False)
+            self.update_status(
+                "Mock explanation failed: No completed report is available."
+            )
+            return False
+        if not callable(self.test_mock_explanation_handler):
+            self._set_test_mock_explanation_enabled(False)
+            self.update_status(
+                "Mock explanation failed: The local test provider is unavailable "
+                "in this Qt runtime."
+            )
+            return False
+        try:
+            error = self.test_mock_explanation_handler(self.report)
+        except Exception as exc:
+            error = (
+                "The deterministic local explanation failed safely: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        if error is not None:
+            self.update_status(f"Mock explanation failed: {error}")
+            return False
+
+        self.update_status(
+            "Opened deterministic local mock explanation. No AI model or network "
+            "service was used."
+        )
+        return True
+
     def _run_report_action(self, handler: Any, success_message: str) -> bool:
         report_path, error = _validated_report_path(self.report_path)
         if error is None and not callable(handler):
@@ -352,6 +458,24 @@ class _ResultsDialogController:
             if callable(set_enabled):
                 set_enabled(enabled and callable(handler))
 
+    def _set_preview_ai_context_enabled(self, enabled: bool) -> None:
+        if self.preview_ai_context_button is None:
+            return
+        set_enabled = getattr(self.preview_ai_context_button, "setEnabled", None)
+        if callable(set_enabled):
+            set_enabled(enabled and callable(self.preview_ai_context_handler))
+
+    def _set_test_mock_explanation_enabled(self, enabled: bool) -> None:
+        if self.test_mock_explanation_button is None:
+            return
+        set_enabled = getattr(
+            self.test_mock_explanation_button,
+            "setEnabled",
+            None,
+        )
+        if callable(set_enabled):
+            set_enabled(enabled and callable(self.test_mock_explanation_handler))
+
     def show(self) -> None:
         """Show and foreground the existing non-modal dialog."""
 
@@ -365,6 +489,8 @@ class _ResultsDialogController:
 
 
 _results_dialog: _ResultsDialogController | None = None
+_ai_context_preview_dialog: _ReadOnlyTextDialogController | None = None
+_mock_explanation_dialog: _ReadOnlyTextDialogController | None = None
 
 
 def register_command() -> bool:
@@ -487,6 +613,7 @@ def run_analysis_command(
         )
         show_results_dialog(
             presentation,
+            report=report,
             gui_module=active_gui,
             document_context=document_context,
             status_message=_presentation_status_message(
@@ -502,6 +629,7 @@ def run_analysis_command(
 def show_results_dialog(
     presentation: AnalysisPresentation,
     *,
+    report: ModelHealthReport | None = None,
     gui_module: Any | None = None,
     document_context: _AnalyzedDocumentContext | None = None,
     status_message: str = "",
@@ -523,6 +651,7 @@ def show_results_dialog(
 
     _results_dialog.update_presentation(
         presentation,
+        report=report,
         document_context=document_context,
         status_message=status_message,
     )
@@ -710,11 +839,23 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     open_report_folder_button.setEnabled(False)
     copy_report_path_button = qt_widgets.QPushButton("Copy Report Path", dialog)
     copy_report_path_button.setEnabled(False)
+    preview_ai_context_button = qt_widgets.QPushButton(
+        "Preview AI Context",
+        dialog,
+    )
+    preview_ai_context_button.setEnabled(False)
+    test_mock_explanation_button = qt_widgets.QPushButton(
+        "Test Mock Explanation",
+        dialog,
+    )
+    test_mock_explanation_button.setEnabled(False)
     select_feature_button = qt_widgets.QPushButton("Select Feature", dialog)
     select_feature_button.setEnabled(False)
     button_layout.addWidget(select_feature_button)
     button_layout.addWidget(open_report_folder_button)
     button_layout.addWidget(copy_report_path_button)
+    button_layout.addWidget(preview_ai_context_button)
+    button_layout.addWidget(test_mock_explanation_button)
     button_layout.addWidget(refresh_analysis_button)
     button_layout.addStretch()
     close_button = qt_widgets.QPushButton("Close", dialog)
@@ -769,11 +910,25 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
         ),
         refresh_analysis_button=refresh_analysis_button,
         status_label=status_label,
+        preview_ai_context_button=preview_ai_context_button,
+        preview_ai_context_handler=lambda report: _show_ai_context_preview(
+            report,
+            qt_widgets,
+            dialog,
+        ),
+        test_mock_explanation_button=test_mock_explanation_button,
+        test_mock_explanation_handler=lambda report: _show_mock_explanation(
+            report,
+            qt_widgets,
+            dialog,
+        ),
     )
     _connect_warning_table_actions(warning_table, controller)
     select_feature_button.clicked.connect(controller.select_selected_feature)
     open_report_folder_button.clicked.connect(controller.open_report_folder)
     copy_report_path_button.clicked.connect(controller.copy_report_path)
+    preview_ai_context_button.clicked.connect(controller.preview_ai_context)
+    test_mock_explanation_button.clicked.connect(controller.test_mock_explanation)
     refresh_analysis_button.clicked.connect(controller.refresh_analysis)
     destroyed_signal = getattr(dialog, "destroyed", None)
     if destroyed_signal is not None and hasattr(destroyed_signal, "connect"):
@@ -783,6 +938,226 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
             )
         )
     return controller
+
+
+def _build_ai_context_preview_json(report: ModelHealthReport) -> str:
+    """Return readable JSON for exactly the local allowlisted context object."""
+
+    from model_health_assistant.ai_context import build_ai_request_context
+
+    context = build_ai_request_context(report)
+    return json.dumps(
+        context.to_dict(),
+        indent=2,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _show_ai_context_preview(
+    report: ModelHealthReport,
+    qt_widgets: Any,
+    parent: Any,
+) -> str | None:
+    """Create or update the single local context-preview child dialog."""
+
+    try:
+        preview_json = _build_ai_context_preview_json(report)
+    except Exception as exc:
+        return (
+            "Could not build the privacy-safe context: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    global _ai_context_preview_dialog
+    if _ai_context_preview_dialog is None:
+        _ai_context_preview_dialog = _create_ai_context_preview_dialog(
+            qt_widgets,
+            parent,
+        )
+    _ai_context_preview_dialog.update_text(preview_json)
+    _ai_context_preview_dialog.show()
+    return None
+
+
+def _create_ai_context_preview_dialog(
+    qt_widgets: Any,
+    parent: Any,
+) -> _ReadOnlyTextDialogController:
+    dialog = qt_widgets.QDialog(parent)
+    dialog.setWindowTitle("Preview AI Context — Local Only")
+    dialog.setModal(False)
+    dialog.setMinimumSize(720, 520)
+
+    layout = qt_widgets.QVBoxLayout(dialog)
+    notice_label = qt_widgets.QLabel(AI_CONTEXT_PREVIEW_NOTICE, dialog)
+    if hasattr(notice_label, "setWordWrap"):
+        notice_label.setWordWrap(True)
+    layout.addWidget(notice_label)
+
+    context_view = qt_widgets.QPlainTextEdit(dialog)
+    context_view.setReadOnly(True)
+    layout.addWidget(context_view)
+
+    button_layout = qt_widgets.QHBoxLayout()
+    button_layout.addStretch()
+    close_button = qt_widgets.QPushButton("Close", dialog)
+    close_button.setShortcut("Esc")
+    close_button.clicked.connect(dialog.close)
+    button_layout.addWidget(close_button)
+    layout.addLayout(button_layout)
+
+    controller = _ReadOnlyTextDialogController(dialog, context_view)
+    destroyed_signal = getattr(dialog, "destroyed", None)
+    if destroyed_signal is not None and hasattr(destroyed_signal, "connect"):
+        destroyed_signal.connect(
+            lambda *_args, held_controller=controller: _clear_ai_context_preview_dialog(
+                held_controller
+            )
+        )
+    return controller
+
+
+def _clear_ai_context_preview_dialog(
+    controller: _ReadOnlyTextDialogController,
+) -> None:
+    global _ai_context_preview_dialog
+    if _ai_context_preview_dialog is controller:
+        _ai_context_preview_dialog = None
+
+
+def _show_mock_explanation(
+    report: ModelHealthReport,
+    qt_widgets: Any,
+    parent: Any,
+) -> str | None:
+    """Run the deterministic local provider and show its validated response."""
+
+    try:
+        from model_health_assistant.ai_service import AIExplanationService
+        from model_health_assistant.mock_ai_provider import LocalMockAIProvider
+
+        response = AIExplanationService(LocalMockAIProvider()).explain_report(report)
+        explanation_text = _format_mock_explanation_response(response)
+    except Exception as exc:
+        return (
+            "Could not produce the deterministic local explanation: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    global _mock_explanation_dialog
+    if _mock_explanation_dialog is None:
+        _mock_explanation_dialog = _create_mock_explanation_dialog(
+            qt_widgets,
+            parent,
+        )
+    _mock_explanation_dialog.update_text(explanation_text)
+    _mock_explanation_dialog.show()
+    return None
+
+
+def _format_mock_explanation_response(response: Any) -> str:
+    """Format a validated explanation response for a read-only local view."""
+
+    lines = [
+        f"Provider: {response.provider_display_name} "
+        f"({response.provider_identifier})",
+        "",
+        "Summary:",
+        response.overall_summary,
+        "",
+        "Warning explanations:",
+    ]
+
+    if not response.warning_explanations:
+        lines.append("No source warnings were available to explain.")
+
+    for index, warning in enumerate(response.warning_explanations, start=1):
+        feature_name = warning.affected_feature_internal_name or "(document-level)"
+        lines.extend(
+            (
+                "",
+                f"Warning {index}",
+                f"Rule: {warning.rule_id}",
+                f"Feature: {feature_name}",
+                f"Severity: {warning.severity}",
+                "Explanation:",
+                warning.explanation,
+                "Why it matters:",
+                warning.why_it_matters,
+                "Manual review steps:",
+            )
+        )
+        if warning.manual_review_steps:
+            lines.extend(
+                f"{step_index}. {step}"
+                for step_index, step in enumerate(
+                    warning.manual_review_steps,
+                    start=1,
+                )
+            )
+        else:
+            lines.append("None supplied.")
+        if warning.confidence:
+            lines.extend(("Confidence:", warning.confidence))
+        lines.append("Limitations:")
+        if warning.limitations:
+            lines.extend(f"- {limitation}" for limitation in warning.limitations)
+        else:
+            lines.append("- None supplied.")
+
+    lines.extend(("", "Overall limitations:"))
+    if response.limitations:
+        lines.extend(f"- {limitation}" for limitation in response.limitations)
+    else:
+        lines.append("- None supplied.")
+    return "\n".join(lines)
+
+
+def _create_mock_explanation_dialog(
+    qt_widgets: Any,
+    parent: Any,
+) -> _ReadOnlyTextDialogController:
+    dialog = qt_widgets.QDialog(parent)
+    dialog.setWindowTitle("Mock Explanation - Local Test Provider")
+    dialog.setModal(False)
+    dialog.setMinimumSize(720, 520)
+
+    layout = qt_widgets.QVBoxLayout(dialog)
+    notice_label = qt_widgets.QLabel(MOCK_EXPLANATION_NOTICE, dialog)
+    if hasattr(notice_label, "setWordWrap"):
+        notice_label.setWordWrap(True)
+    layout.addWidget(notice_label)
+
+    explanation_view = qt_widgets.QPlainTextEdit(dialog)
+    explanation_view.setReadOnly(True)
+    layout.addWidget(explanation_view)
+
+    button_layout = qt_widgets.QHBoxLayout()
+    button_layout.addStretch()
+    close_button = qt_widgets.QPushButton("Close", dialog)
+    close_button.setShortcut("Esc")
+    close_button.clicked.connect(dialog.close)
+    button_layout.addWidget(close_button)
+    layout.addLayout(button_layout)
+
+    controller = _ReadOnlyTextDialogController(dialog, explanation_view)
+    destroyed_signal = getattr(dialog, "destroyed", None)
+    if destroyed_signal is not None and hasattr(destroyed_signal, "connect"):
+        destroyed_signal.connect(
+            lambda *_args, held_controller=controller: _clear_mock_explanation_dialog(
+                held_controller
+            )
+        )
+    return controller
+
+
+def _clear_mock_explanation_dialog(
+    controller: _ReadOnlyTextDialogController,
+) -> None:
+    global _mock_explanation_dialog
+    if _mock_explanation_dialog is controller:
+        _mock_explanation_dialog = None
 
 
 def _connect_warning_table_actions(

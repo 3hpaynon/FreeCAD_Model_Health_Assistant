@@ -141,7 +141,7 @@ def test_test_command_prints_when_clicked(monkeypatch) -> None:
     monkeypatch.setattr(
         ui,
         "show_results_dialog",
-        lambda presentation, *, gui_module=None, document_context=None, status_message="": (
+        lambda presentation, *, report=None, gui_module=None, document_context=None, status_message="": (
             shown_presentations.append(presentation)
         ),
     )
@@ -192,8 +192,8 @@ def test_test_command_prints_active_document_name(monkeypatch, tmp_path) -> None
     monkeypatch.setattr(
         ui,
         "show_results_dialog",
-        lambda presentation, *, gui_module=None, document_context=None, status_message="": shown_presentations.append(
-            (presentation, gui_module, document_context, status_message)
+        lambda presentation, *, report=None, gui_module=None, document_context=None, status_message="": shown_presentations.append(
+            (presentation, report, gui_module, document_context, status_message)
         ),
     )
 
@@ -226,8 +226,9 @@ def test_test_command_prints_active_document_name(monkeypatch, tmp_path) -> None
     ]
     assert output_path.exists()
     assert len(shown_presentations) == 1
-    presentation, passed_gui, document_context, status_message = shown_presentations[0]
+    presentation, report, passed_gui, document_context, status_message = shown_presentations[0]
     assert presentation.document_name == "Mechanical-EM Coupler Clutch Practice Model"
+    assert report.document_name == "Mechanical-EM Coupler Clutch Practice Model"
     assert presentation.health_score == 100
     assert presentation.meaningful_modeling_feature_count == 0
     assert presentation.total_sketch_count == 0

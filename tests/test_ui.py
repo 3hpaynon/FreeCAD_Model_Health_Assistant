@@ -1,9 +1,12 @@
+import json
+import socket
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 from model_health_assistant.presentation import AnalysisPresentation, WarningDisplayItem
 from model_health_assistant import ui
+from model_health_assistant.models import FeatureInfo, ModelHealthReport, RiskWarning
 
 
 def _presentation(
@@ -88,6 +91,7 @@ def test_show_results_dialog_reuses_and_updates_one_controller(monkeypatch) -> N
             self,
             presentation,
             *,
+            report=None,
             document_context=None,
             status_message="",
         ) -> None:
@@ -1134,3 +1138,517 @@ def test_warning_table_double_click_reuses_selection_action() -> None:
 
     table.itemDoubleClicked.emit(object())
     assert calls == ["details", "select"]
+
+
+def _ai_preview_report() -> ModelHealthReport:
+    feature = FeatureInfo(
+        internal_name="Pocket001",
+        label="Drive pocket",
+        type_id="PartDesign::Pocket",
+        category="subtractive_feature",
+        has_confirmed_error=True,
+        error_details=[
+            r"Error log: C:\Users\private-user\AppData\Local\FreeCAD\trace.txt"
+        ],
+    )
+    warning = RiskWarning(
+        warning_id="WARN-001",
+        severity="high",
+        affected_feature_name="Pocket001",
+        message="Pocket001 reports an error.",
+        technical_reason="FreeCAD exposed an explicit error state.",
+        suggested_practice="Review the feature manually.",
+        rule_id="confirmed_recompute_error",
+    )
+    return ModelHealthReport(
+        document_name=r"C:\Users\private-user\CAD Models\private.FCStd",
+        generated_at="2026-07-16T12:30:00+00:00",
+        health_score=70,
+        features=[feature],
+        warnings=[warning],
+        metadata={"report_path": r"C:\Users\private-user\reports\health.json"},
+    )
+
+
+def test_ai_context_preview_json_is_allowlisted_readable_and_local(monkeypatch) -> None:
+    from model_health_assistant import extractor
+
+    monkeypatch.setattr(
+        extractor,
+        "extract_document_features",
+        lambda _document: (_ for _ in ()).throw(
+            AssertionError("preview must not rerun extraction")
+        ),
+    )
+
+    preview_json = ui._build_ai_context_preview_json(_ai_preview_report())
+    data = json.loads(preview_json)
+
+    assert data["schema_version"] == "1.0"
+    assert data["health_score"] == 70
+    assert data["total_warning_count"] == 1
+    assert data["warnings"][0]["rule_id"] == "confirmed_recompute_error"
+    assert data["warnings"][0]["severity"] == "high"
+    assert data["metadata"]["limit_policy_version"] == "context-limits-v1"
+    assert "C:\\Users" not in preview_json
+    assert "private-user" not in preview_json
+    assert "report_path" not in preview_json
+    assert ".FCStd" not in preview_json
+
+
+def test_results_controller_previews_exact_retained_report() -> None:
+    class FakeButton:
+        def __init__(self) -> None:
+            self.enabled = None
+
+        def setEnabled(self, enabled: bool) -> None:  # noqa: N802
+            self.enabled = enabled
+
+    labels = {
+        key: SimpleNamespace(setText=lambda _text: None)
+        for key in (
+            "document",
+            "score",
+            "meaningful_features",
+            "sketches",
+            "warnings",
+            "report",
+        )
+    }
+    preview_button = FakeButton()
+    received_reports = []
+    report = _ai_preview_report()
+    controller = ui._ResultsDialogController(
+        SimpleNamespace(),
+        labels,
+        preview_ai_context_button=preview_button,
+        preview_ai_context_handler=lambda received: received_reports.append(received),
+    )
+
+    controller.update_presentation(
+        _presentation(report_path=None),
+        report=report,
+    )
+
+    assert controller.report is report
+    assert preview_button.enabled is True
+    assert controller.preview_ai_context() is True
+    assert received_reports == [report]
+
+
+def test_context_preview_requires_completed_report() -> None:
+    statuses = []
+    button_states = []
+    controller = ui._ResultsDialogController(
+        SimpleNamespace(),
+        {},
+        preview_ai_context_button=SimpleNamespace(
+            setEnabled=lambda enabled: button_states.append(enabled)
+        ),
+        preview_ai_context_handler=lambda _report: None,
+        status_label=SimpleNamespace(
+            setText=statuses.append,
+            setVisible=lambda _visible: None,
+        ),
+    )
+
+    assert controller.preview_ai_context() is False
+    assert button_states == [False]
+    assert statuses[-1] == (
+        "AI context preview failed: No completed report is available."
+    )
+
+
+def test_context_preview_reuses_one_dialog_controller(monkeypatch) -> None:
+    created = []
+
+    class FakePreviewController:
+        def __init__(self) -> None:
+            self.texts = []
+            self.show_count = 0
+
+        def update_text(self, text: str) -> None:
+            self.texts.append(text)
+
+        def show(self) -> None:
+            self.show_count += 1
+
+    preview_controller = FakePreviewController()
+    monkeypatch.setattr(ui, "_ai_context_preview_dialog", None)
+    monkeypatch.setattr(
+        ui,
+        "_create_ai_context_preview_dialog",
+        lambda qt_widgets, parent: (
+            created.append((qt_widgets, parent)) or preview_controller
+        ),
+    )
+    report = _ai_preview_report()
+
+    assert ui._show_ai_context_preview(report, "qt", "parent") is None
+    assert ui._show_ai_context_preview(report, "qt", "parent") is None
+
+    assert created == [("qt", "parent")]
+    assert preview_controller.show_count == 2
+    assert len(preview_controller.texts) == 2
+    assert preview_controller.texts[0] == preview_controller.texts[1]
+    ui._clear_ai_context_preview_dialog(preview_controller)
+    assert ui._ai_context_preview_dialog is None
+
+
+def test_ai_context_preview_dialog_is_parented_read_only_and_closable() -> None:
+    class FakeSignal:
+        def __init__(self) -> None:
+            self.callbacks = []
+
+        def connect(self, callback) -> None:
+            self.callbacks.append(callback)
+
+    class FakeDialog:
+        def __init__(self, parent) -> None:
+            self.parent = parent
+            self.destroyed = FakeSignal()
+            self.title = ""
+            self.modal = None
+            self.minimum_size = None
+            self.show_count = 0
+
+        def setWindowTitle(self, title: str) -> None:  # noqa: N802
+            self.title = title
+
+        def setModal(self, modal: bool) -> None:  # noqa: N802
+            self.modal = modal
+
+        def setMinimumSize(self, width: int, height: int) -> None:  # noqa: N802
+            self.minimum_size = (width, height)
+
+        def show(self) -> None:
+            self.show_count += 1
+
+        def close(self) -> None:
+            pass
+
+    class FakeLayout:
+        def __init__(self, *_args) -> None:
+            pass
+
+        def addWidget(self, _widget) -> None:  # noqa: N802
+            pass
+
+        def addLayout(self, _layout) -> None:  # noqa: N802
+            pass
+
+        def addStretch(self) -> None:  # noqa: N802
+            pass
+
+    class FakeLabel:
+        def __init__(self, text: str, parent) -> None:
+            self.text = text
+            self.parent = parent
+            self.word_wrap = False
+
+        def setWordWrap(self, enabled: bool) -> None:  # noqa: N802
+            self.word_wrap = enabled
+
+    class FakeTextView:
+        def __init__(self, parent) -> None:
+            self.parent = parent
+            self.read_only = False
+            self.text = ""
+
+        def setReadOnly(self, enabled: bool) -> None:  # noqa: N802
+            self.read_only = enabled
+
+        def setPlainText(self, text: str) -> None:  # noqa: N802
+            self.text = text
+
+    class FakeButton:
+        def __init__(self, text: str, parent) -> None:
+            self.text = text
+            self.parent = parent
+            self.clicked = FakeSignal()
+            self.shortcut = None
+
+        def setShortcut(self, shortcut: str) -> None:  # noqa: N802
+            self.shortcut = shortcut
+
+    labels = []
+    text_views = []
+    buttons = []
+    qt_widgets = SimpleNamespace(
+        QDialog=FakeDialog,
+        QVBoxLayout=FakeLayout,
+        QHBoxLayout=FakeLayout,
+        QLabel=lambda text, parent: labels.append(FakeLabel(text, parent)) or labels[-1],
+        QPlainTextEdit=lambda parent: text_views.append(FakeTextView(parent)) or text_views[-1],
+        QPushButton=lambda text, parent: buttons.append(FakeButton(text, parent)) or buttons[-1],
+    )
+    parent = object()
+
+    controller = ui._create_ai_context_preview_dialog(qt_widgets, parent)
+    controller.update_text('{"schema_version": "1.0"}')
+
+    assert controller.dialog.parent is parent
+    assert controller.dialog.title == "Preview AI Context — Local Only"
+    assert controller.dialog.modal is False
+    assert labels[0].text == ui.AI_CONTEXT_PREVIEW_NOTICE
+    assert labels[0].word_wrap is True
+    assert text_views[0].read_only is True
+    assert text_views[0].text == '{"schema_version": "1.0"}'
+    assert buttons[0].text == "Close"
+    assert buttons[0].shortcut == "Esc"
+
+
+def test_ai_context_preview_performs_no_network_access(monkeypatch) -> None:
+    monkeypatch.setattr(
+        socket,
+        "socket",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("network access is forbidden")
+        ),
+    )
+
+    preview_json = ui._build_ai_context_preview_json(_ai_preview_report())
+
+    assert json.loads(preview_json)["schema_version"] == "1.0"
+
+
+def test_results_controller_runs_mock_for_exact_retained_report() -> None:
+    class FakeButton:
+        def __init__(self) -> None:
+            self.enabled = None
+
+        def setEnabled(self, enabled: bool) -> None:  # noqa: N802
+            self.enabled = enabled
+
+    button = FakeButton()
+    received_reports = []
+    report = _ai_preview_report()
+    controller = ui._ResultsDialogController(
+        SimpleNamespace(),
+        {},
+        test_mock_explanation_button=button,
+        test_mock_explanation_handler=lambda received: received_reports.append(
+            received
+        ),
+    )
+
+    controller.update_presentation(_presentation(report_path=None), report=report)
+
+    assert controller.report is report
+    assert button.enabled is True
+    assert controller.test_mock_explanation() is True
+    assert received_reports == [report]
+
+
+def test_mock_explanation_requires_completed_report() -> None:
+    statuses = []
+    button_states = []
+    controller = ui._ResultsDialogController(
+        SimpleNamespace(),
+        {},
+        test_mock_explanation_button=SimpleNamespace(
+            setEnabled=lambda enabled: button_states.append(enabled)
+        ),
+        test_mock_explanation_handler=lambda _report: None,
+        status_label=SimpleNamespace(
+            setText=statuses.append,
+            setVisible=lambda _visible: None,
+        ),
+    )
+
+    assert controller.test_mock_explanation() is False
+    assert button_states == [False]
+    assert statuses[-1] == (
+        "Mock explanation failed: No completed report is available."
+    )
+
+
+def test_mock_explanation_uses_validated_local_service_without_mutation_or_network(
+    monkeypatch,
+) -> None:
+    from model_health_assistant import extractor
+
+    class FakeExplanationController:
+        def __init__(self) -> None:
+            self.texts = []
+            self.show_count = 0
+
+        def update_text(self, text: str) -> None:
+            self.texts.append(text)
+
+        def show(self) -> None:
+            self.show_count += 1
+
+    monkeypatch.setattr(
+        socket,
+        "socket",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("network access is forbidden")
+        ),
+    )
+    monkeypatch.setattr(
+        extractor,
+        "extract_document_features",
+        lambda _document: (_ for _ in ()).throw(
+            AssertionError("mock explanation must not rerun extraction")
+        ),
+    )
+    controller = FakeExplanationController()
+    created = []
+    monkeypatch.setattr(ui, "_mock_explanation_dialog", None)
+    monkeypatch.setattr(
+        ui,
+        "_create_mock_explanation_dialog",
+        lambda qt_widgets, parent: (
+            created.append((qt_widgets, parent)) or controller
+        ),
+    )
+    report = _ai_preview_report()
+    report_before = report.to_dict()
+
+    assert ui._show_mock_explanation(report, "qt", "parent") is None
+    assert ui._show_mock_explanation(report, "qt", "parent") is None
+
+    assert created == [("qt", "parent")]
+    assert controller.show_count == 2
+    assert len(controller.texts) == 2
+    explanation = controller.texts[-1]
+    assert "Provider: Local Mock Provider (local-mock)" in explanation
+    assert "Summary:" in explanation
+    assert "Rule: confirmed_recompute_error" in explanation
+    assert "Feature: Pocket001" in explanation
+    assert "Severity: high" in explanation
+    assert "Explanation:" in explanation
+    assert "Manual review steps:" in explanation
+    assert "Limitations:" in explanation
+    assert report.to_dict() == report_before
+    assert len(report.warnings) == 1
+    ui._clear_mock_explanation_dialog(controller)
+    assert ui._mock_explanation_dialog is None
+
+
+def test_mock_explanation_formats_zero_warning_report(monkeypatch) -> None:
+    class FakeExplanationController:
+        def __init__(self) -> None:
+            self.text = ""
+
+        def update_text(self, text: str) -> None:
+            self.text = text
+
+        def show(self) -> None:
+            pass
+
+    controller = FakeExplanationController()
+    monkeypatch.setattr(ui, "_mock_explanation_dialog", controller)
+    report = ModelHealthReport(
+        document_name="Empty",
+        generated_at="2026-07-16T12:30:00+00:00",
+        health_score=100,
+    )
+
+    assert ui._show_mock_explanation(report, "qt", "parent") is None
+    assert "Provider: Local Mock Provider (local-mock)" in controller.text
+    assert "No source warnings were available to explain." in controller.text
+    assert "Overall limitations:" in controller.text
+
+
+def test_mock_explanation_dialog_is_parented_read_only_and_closable() -> None:
+    class FakeSignal:
+        def __init__(self) -> None:
+            self.callbacks = []
+
+        def connect(self, callback) -> None:
+            self.callbacks.append(callback)
+
+    class FakeDialog:
+        def __init__(self, parent) -> None:
+            self.parent = parent
+            self.destroyed = FakeSignal()
+            self.title = ""
+            self.modal = None
+            self.minimum_size = None
+
+        def setWindowTitle(self, title: str) -> None:  # noqa: N802
+            self.title = title
+
+        def setModal(self, modal: bool) -> None:  # noqa: N802
+            self.modal = modal
+
+        def setMinimumSize(self, width: int, height: int) -> None:  # noqa: N802
+            self.minimum_size = (width, height)
+
+        def close(self) -> None:
+            pass
+
+    class FakeLayout:
+        def __init__(self, *_args) -> None:
+            pass
+
+        def addWidget(self, _widget) -> None:  # noqa: N802
+            pass
+
+        def addLayout(self, _layout) -> None:  # noqa: N802
+            pass
+
+        def addStretch(self) -> None:  # noqa: N802
+            pass
+
+    class FakeLabel:
+        def __init__(self, text: str, parent) -> None:
+            self.text = text
+            self.parent = parent
+            self.word_wrap = False
+
+        def setWordWrap(self, enabled: bool) -> None:  # noqa: N802
+            self.word_wrap = enabled
+
+    class FakeTextView:
+        def __init__(self, parent) -> None:
+            self.parent = parent
+            self.read_only = False
+            self.text = ""
+
+        def setReadOnly(self, enabled: bool) -> None:  # noqa: N802
+            self.read_only = enabled
+
+        def setPlainText(self, text: str) -> None:  # noqa: N802
+            self.text = text
+
+    class FakeButton:
+        def __init__(self, text: str, parent) -> None:
+            self.text = text
+            self.parent = parent
+            self.clicked = FakeSignal()
+            self.shortcut = None
+
+        def setShortcut(self, shortcut: str) -> None:  # noqa: N802
+            self.shortcut = shortcut
+
+    labels = []
+    text_views = []
+    buttons = []
+    qt_widgets = SimpleNamespace(
+        QDialog=FakeDialog,
+        QVBoxLayout=FakeLayout,
+        QHBoxLayout=FakeLayout,
+        QLabel=lambda text, parent: labels.append(FakeLabel(text, parent))
+        or labels[-1],
+        QPlainTextEdit=lambda parent: text_views.append(FakeTextView(parent))
+        or text_views[-1],
+        QPushButton=lambda text, parent: buttons.append(FakeButton(text, parent))
+        or buttons[-1],
+    )
+    parent = object()
+
+    controller = ui._create_mock_explanation_dialog(qt_widgets, parent)
+    controller.update_text("Local mock result")
+
+    assert controller.dialog.parent is parent
+    assert controller.dialog.title == "Mock Explanation - Local Test Provider"
+    assert controller.dialog.modal is False
+    assert labels[0].text == ui.MOCK_EXPLANATION_NOTICE
+    assert labels[0].word_wrap is True
+    assert text_views[0].read_only is True
+    assert text_views[0].text == "Local mock result"
+    assert buttons[0].text == "Close"
+    assert buttons[0].shortcut == "Esc"
