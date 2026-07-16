@@ -7,12 +7,15 @@ actually requested.
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from model_health_assistant.models import ModelHealthReport
 from model_health_assistant.presentation import (
     AnalysisPresentation,
+    WarningDisplayItem,
     build_analysis_presentation,
 )
 
@@ -28,6 +31,19 @@ except Exception:  # pragma: no cover - expected in normal unit tests.
 
 
 COMMAND_NAME = "MHA_AnalyzeFeatureTree"
+
+_WARNING_TABLE_HEADERS = ("Severity", "Feature", "Rule", "Warning")
+_NO_WARNINGS_MESSAGE = "No model-health warnings were generated."
+
+
+@dataclass(frozen=True, slots=True)
+class _AnalyzedDocumentContext:
+    """UI-only identity and API context for the document that was analyzed."""
+
+    document: Any
+    document_name: str
+    app_module: Any
+    gui_module: Any
 
 
 class AnalyzeFeatureTreeCommand:
@@ -60,13 +76,40 @@ class AnalyzeFeatureTreeCommand:
 class _ResultsDialogController:
     """Keep Qt details behind a small Python interface that is easy to reuse."""
 
-    def __init__(self, dialog: Any, value_labels: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        dialog: Any,
+        value_labels: dict[str, Any],
+        *,
+        warning_table: Any | None = None,
+        empty_warning_label: Any | None = None,
+        table_item_factory: Any | None = None,
+        feature_name_data_role: Any | None = None,
+        warning_details: Any | None = None,
+        select_feature_button: Any | None = None,
+        selection_error_handler: Any | None = None,
+    ) -> None:
         self.dialog = dialog
         self.value_labels = value_labels
+        self.warning_table = warning_table
+        self.empty_warning_label = empty_warning_label
+        self.table_item_factory = table_item_factory
+        self.feature_name_data_role = feature_name_data_role
+        self.warning_details = warning_details
+        self.select_feature_button = select_feature_button
+        self.selection_error_handler = selection_error_handler
+        self.warning_items: tuple[WarningDisplayItem, ...] = ()
+        self.document_context: _AnalyzedDocumentContext | None = None
 
-    def update_presentation(self, presentation: AnalysisPresentation) -> None:
+    def update_presentation(
+        self,
+        presentation: AnalysisPresentation,
+        *,
+        document_context: _AnalyzedDocumentContext | None = None,
+    ) -> None:
         """Replace every displayed summary value."""
 
+        self.document_context = document_context
         self.value_labels["document"].setText(presentation.document_name)
         self.value_labels["score"].setText(f"{presentation.health_score}/100")
         self.value_labels["meaningful_features"].setText(
@@ -80,6 +123,124 @@ class _ResultsDialogController:
             else "Not available"
         )
         self.value_labels["report"].setText(report_text)
+        self._update_warning_table(presentation)
+
+    def _update_warning_table(self, presentation: AnalysisPresentation) -> None:
+        self.warning_items = tuple(presentation.warning_items)
+        warning_items = self.warning_items
+        self._set_warning_details("")
+        self._set_select_feature_enabled(False)
+        if self.empty_warning_label is not None:
+            set_text = getattr(self.empty_warning_label, "setText", None)
+            if callable(set_text):
+                set_text(_NO_WARNINGS_MESSAGE)
+            set_visible = getattr(self.empty_warning_label, "setVisible", None)
+            if callable(set_visible):
+                set_visible(not warning_items)
+
+        if self.warning_table is None or self.table_item_factory is None:
+            return
+
+        clear_selection = getattr(self.warning_table, "clearSelection", None)
+        if callable(clear_selection):
+            clear_selection()
+        self.warning_table.setRowCount(0)
+        self.warning_table.setRowCount(len(warning_items))
+        for row_index, warning in enumerate(warning_items):
+            values = _warning_table_values(warning)
+            for column_index, value in enumerate(values):
+                table_item = self.table_item_factory(value)
+                if (
+                    column_index == 1
+                    and warning.feature_internal_name
+                    and self.feature_name_data_role is not None
+                ):
+                    set_data = getattr(table_item, "setData", None)
+                    if callable(set_data):
+                        set_data(
+                            self.feature_name_data_role,
+                            warning.feature_internal_name,
+                        )
+                self.warning_table.setItem(row_index, column_index, table_item)
+
+    def update_selected_warning_details(self) -> None:
+        """Show selected details and enable selection only for a valid target."""
+
+        self._set_warning_details("")
+        self._set_select_feature_enabled(False)
+        warning = self._selected_warning()
+        if warning is None:
+            return
+
+        self._set_warning_details(_format_warning_details(warning))
+        validation_error = _select_feature_by_internal_name(
+            self.document_context,
+            warning.feature_internal_name,
+            perform_selection=False,
+        )
+        self._set_select_feature_enabled(validation_error is None)
+
+    def select_selected_feature(self, *_args: Any) -> bool:
+        """Revalidate and select the selected warning's internal feature name."""
+
+        warning = self._selected_warning()
+        if warning is None:
+            self._set_select_feature_enabled(False)
+            return False
+
+        error = _select_feature_by_internal_name(
+            self.document_context,
+            warning.feature_internal_name,
+            perform_selection=True,
+        )
+        if error is None:
+            return True
+
+        self._set_select_feature_enabled(False)
+        if callable(self.selection_error_handler):
+            self.selection_error_handler(error)
+        app_module = (
+            self.document_context.app_module
+            if self.document_context is not None
+            else App
+        )
+        _print_message(f"Model Health Assistant: {error}\n", app_module)
+        return False
+
+    def _selected_warning(self) -> WarningDisplayItem | None:
+        if self.warning_table is None:
+            return None
+        selected_items_method = getattr(self.warning_table, "selectedItems", None)
+        current_row_method = getattr(self.warning_table, "currentRow", None)
+        if not callable(selected_items_method) or not callable(current_row_method):
+            return None
+        selected_items = selected_items_method()
+        if not selected_items:
+            return None
+        row_index = current_row_method()
+        if not isinstance(row_index, int) or not 0 <= row_index < len(
+            self.warning_items
+        ):
+            return None
+        return self.warning_items[row_index]
+
+    def _set_warning_details(self, text: str) -> None:
+        if self.warning_details is None:
+            return
+        set_plain_text = getattr(self.warning_details, "setPlainText", None)
+        if callable(set_plain_text):
+            set_plain_text(text)
+            return
+        set_text = getattr(self.warning_details, "setText", None)
+        if callable(set_text):
+            set_text(text)
+
+    def _set_select_feature_enabled(self, enabled: bool) -> None:
+        if self.select_feature_button is None:
+            return
+        set_enabled = getattr(self.select_feature_button, "setEnabled", None)
+        if callable(set_enabled):
+            set_enabled(enabled)
 
     def show(self) -> None:
         """Show and foreground the existing non-modal dialog."""
@@ -194,7 +355,17 @@ def run_analysis_command(
     presentation = None
     try:
         presentation = build_analysis_presentation(report, saved_path)
-        show_results_dialog(presentation, gui_module=active_gui)
+        document_context = _AnalyzedDocumentContext(
+            document=document,
+            document_name=str(getattr(document, "Name", None) or ""),
+            app_module=active_app,
+            gui_module=active_gui,
+        )
+        show_results_dialog(
+            presentation,
+            gui_module=active_gui,
+            document_context=document_context,
+        )
     except Exception as exc:  # pragma: no cover - defensive FreeCAD runtime boundary.
         _print_error(_failure_message("Results dialog failed", exc), active_app)
     return presentation
@@ -204,6 +375,7 @@ def show_results_dialog(
     presentation: AnalysisPresentation,
     *,
     gui_module: Any | None = None,
+    document_context: _AnalyzedDocumentContext | None = None,
 ) -> bool:
     """Create or update the single parented, non-modal results dialog."""
 
@@ -220,7 +392,10 @@ def show_results_dialog(
     if _results_dialog is None:
         _results_dialog = _create_results_dialog(qt_widgets, parent)
 
-    _results_dialog.update_presentation(presentation)
+    _results_dialog.update_presentation(
+        presentation,
+        document_context=document_context,
+    )
     _results_dialog.show()
     return True
 
@@ -308,14 +483,49 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
         value_labels[key] = value_label
         form_layout.addRow(caption, value_label)
 
+    warning_table = qt_widgets.QTableWidget(dialog)
+    _configure_warning_table(qt_widgets, warning_table)
+    layout.addWidget(warning_table)
+
+    empty_warning_label = qt_widgets.QLabel(_NO_WARNINGS_MESSAGE, dialog)
+    empty_warning_label.setVisible(False)
+    layout.addWidget(empty_warning_label)
+
+    details_label = qt_widgets.QLabel("Warning details:", dialog)
+    layout.addWidget(details_label)
+    warning_details = qt_widgets.QPlainTextEdit(dialog)
+    warning_details.setReadOnly(True)
+    layout.addWidget(warning_details)
+
     button_layout = qt_widgets.QHBoxLayout()
+    select_feature_button = qt_widgets.QPushButton("Select Feature", dialog)
+    select_feature_button.setEnabled(False)
+    button_layout.addWidget(select_feature_button)
     button_layout.addStretch()
     close_button = qt_widgets.QPushButton("Close", dialog)
     close_button.clicked.connect(dialog.close)
     button_layout.addWidget(close_button)
     layout.addLayout(button_layout)
 
-    controller = _ResultsDialogController(dialog, value_labels)
+    controller = _ResultsDialogController(
+        dialog,
+        value_labels,
+        warning_table=warning_table,
+        empty_warning_label=empty_warning_label,
+        table_item_factory=qt_widgets.QTableWidgetItem,
+        feature_name_data_role=_load_qt_user_role(),
+        warning_details=warning_details,
+        select_feature_button=select_feature_button,
+        selection_error_handler=lambda message: _show_selection_error(
+            qt_widgets,
+            dialog,
+            message,
+        ),
+    )
+    warning_table.itemSelectionChanged.connect(
+        controller.update_selected_warning_details
+    )
+    select_feature_button.clicked.connect(controller.select_selected_feature)
     destroyed_signal = getattr(dialog, "destroyed", None)
     if destroyed_signal is not None and hasattr(destroyed_signal, "connect"):
         destroyed_signal.connect(
@@ -324,6 +534,143 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
             )
         )
     return controller
+
+
+def _configure_warning_table(qt_widgets: Any, warning_table: Any) -> None:
+    """Configure the warning table as a read-only, row-selecting view."""
+
+    warning_table.setColumnCount(len(_WARNING_TABLE_HEADERS))
+    warning_table.setHorizontalHeaderLabels(list(_WARNING_TABLE_HEADERS))
+    warning_table.setSortingEnabled(False)
+
+    item_view = getattr(qt_widgets, "QAbstractItemView", None)
+    if item_view is None:
+        return
+    warning_table.setEditTriggers(item_view.NoEditTriggers)
+    warning_table.setSelectionBehavior(item_view.SelectRows)
+    warning_table.setSelectionMode(item_view.SingleSelection)
+
+
+def _warning_table_values(warning: Any) -> tuple[str, str, str, str]:
+    feature = (
+        warning.feature_label
+        or warning.feature_internal_name
+        or "Unknown feature"
+    )
+    rule = warning.rule_id or "Unknown rule"
+    severity = str(warning.severity or "").capitalize()
+    return severity, feature, rule, warning.message
+
+
+def _select_feature_by_internal_name(
+    context: _AnalyzedDocumentContext | None,
+    feature_internal_name: str,
+    *,
+    perform_selection: bool,
+) -> str | None:
+    """Validate and optionally select one object by document and object Name."""
+
+    if context is None:
+        return "No analyzed document is available for feature selection."
+    if not feature_internal_name:
+        return "The selected warning has no affected feature internal name."
+    if not context.document_name:
+        return "The analyzed document has no internal FreeCAD name."
+
+    get_document = getattr(context.app_module, "getDocument", None)
+    if not callable(get_document):
+        return "The analyzed document cannot be resolved in FreeCAD."
+    try:
+        open_document = get_document(context.document_name)
+    except Exception:
+        return "The analyzed document is no longer open."
+    if open_document is None:
+        return "The analyzed document is no longer open."
+    if open_document is not context.document:
+        return "The document with that name is not the document that was analyzed."
+
+    get_object = getattr(open_document, "getObject", None)
+    if not callable(get_object):
+        return "The analyzed document does not support internal-name lookup."
+    try:
+        target = get_object(feature_internal_name)
+    except Exception:
+        return f"Feature '{feature_internal_name}' could not be resolved."
+    if target is None:
+        return f"Feature '{feature_internal_name}' no longer exists in the analyzed document."
+    target_name = getattr(target, "Name", feature_internal_name)
+    if str(target_name or "") != feature_internal_name:
+        return "The resolved feature does not match the warning's internal feature name."
+
+    selection = getattr(context.gui_module, "Selection", None)
+    clear_selection = getattr(selection, "clearSelection", None)
+    add_selection = getattr(selection, "addSelection", None)
+    if not callable(clear_selection) or not callable(add_selection):
+        return "FreeCAD selection services are unavailable."
+    if not perform_selection:
+        return None
+
+    try:
+        clear_selection()
+        add_selection(context.document_name, feature_internal_name)
+    except Exception as exc:
+        return (
+            f"FreeCAD could not select feature '{feature_internal_name}': "
+            f"{type(exc).__name__}: {exc}"
+        )
+    return None
+
+
+def _show_selection_error(qt_widgets: Any, parent: Any, message: str) -> None:
+    message_box = getattr(qt_widgets, "QMessageBox", None)
+    show_warning = getattr(message_box, "warning", None)
+    if callable(show_warning):
+        show_warning(parent, "Model Health Assistant", message)
+
+
+def _format_warning_details(warning: WarningDisplayItem) -> str:
+    """Format stored warning facts without inferring unavailable information."""
+
+    severity = str(warning.severity or "").capitalize() or "Not available"
+    raw_penalty = (
+        str(warning.raw_score_penalty)
+        if warning.raw_score_penalty is not None
+        else "Not available"
+    )
+    return "\n".join(
+        (
+            f"Severity: {severity}",
+            f"Rule ID: {warning.rule_id or 'Not available'}",
+            f"Feature label: {warning.feature_label or 'Not available'}",
+            (
+                "Feature internal name: "
+                + (warning.feature_internal_name or "Not available")
+            ),
+            "",
+            "Warning:",
+            warning.message or "Not available",
+            "",
+            "Technical reason:",
+            warning.technical_reason or "Not available",
+            "",
+            "Evidence:",
+            _format_evidence(warning.evidence),
+            "",
+            (
+                "Raw score penalty (before rule caps and prevalence adjustments): "
+                + raw_penalty
+            ),
+        )
+    )
+
+
+def _format_evidence(evidence: dict[str, Any] | None) -> str:
+    if not evidence:
+        return "Not available"
+    try:
+        return json.dumps(evidence, indent=2, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        return "Structured evidence is available but cannot be displayed safely."
 
 
 def _clear_results_dialog(controller: _ResultsDialogController) -> None:
@@ -354,6 +701,20 @@ def _load_qt_widgets() -> Any | None:
             from PySide import QtGui as QtWidgets  # type: ignore
 
             return QtWidgets
+        except Exception:
+            return None
+
+
+def _load_qt_user_role() -> Any | None:
+    try:  # pragma: no cover - depends on FreeCAD's bundled Qt runtime.
+        from PySide2 import QtCore  # type: ignore
+
+        return QtCore.Qt.UserRole
+    except Exception:  # pragma: no cover
+        try:
+            from PySide import QtCore  # type: ignore
+
+            return QtCore.Qt.UserRole
         except Exception:
             return None
 

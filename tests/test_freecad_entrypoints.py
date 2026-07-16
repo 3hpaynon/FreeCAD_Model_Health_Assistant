@@ -141,7 +141,9 @@ def test_test_command_prints_when_clicked(monkeypatch) -> None:
     monkeypatch.setattr(
         ui,
         "show_results_dialog",
-        lambda presentation, *, gui_module=None: shown_presentations.append(presentation),
+        lambda presentation, *, gui_module=None, document_context=None: (
+            shown_presentations.append(presentation)
+        ),
     )
 
     module = _load_module("mha_test_init_gui_click", REPO_ROOT / "InitGui.py")
@@ -190,8 +192,8 @@ def test_test_command_prints_active_document_name(monkeypatch, tmp_path) -> None
     monkeypatch.setattr(
         ui,
         "show_results_dialog",
-        lambda presentation, *, gui_module=None: shown_presentations.append(
-            (presentation, gui_module)
+        lambda presentation, *, gui_module=None, document_context=None: shown_presentations.append(
+            (presentation, gui_module, document_context)
         ),
     )
 
@@ -224,7 +226,7 @@ def test_test_command_prints_active_document_name(monkeypatch, tmp_path) -> None
     ]
     assert output_path.exists()
     assert len(shown_presentations) == 1
-    presentation, passed_gui = shown_presentations[0]
+    presentation, passed_gui, document_context = shown_presentations[0]
     assert presentation.document_name == "Mechanical-EM Coupler Clutch Practice Model"
     assert presentation.health_score == 100
     assert presentation.meaningful_modeling_feature_count == 0
@@ -232,6 +234,10 @@ def test_test_command_prints_active_document_name(monkeypatch, tmp_path) -> None
     assert presentation.total_warning_count == 0
     assert presentation.report_path == output_path
     assert passed_gui is fake_gui
+    assert document_context.document is fake_app.ActiveDocument
+    assert document_context.document_name == "Mechanical_EM_Coupler"
+    assert document_context.app_module is fake_app
+    assert document_context.gui_module is fake_gui
 
 
 def test_test_command_prints_extracted_feature_and_sketch_counts(monkeypatch, tmp_path) -> None:
