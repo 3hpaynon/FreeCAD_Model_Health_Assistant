@@ -98,19 +98,38 @@ class LocalMockAIProvider:
                 "geometry, or use an AI model."
             )
 
+        limitations = [
+            LOCAL_MOCK_LIMITATION,
+            (
+                "The mock provider uses only the supplied structured context and "
+                "does not independently verify warnings or inspect CAD geometry."
+            ),
+            "All review steps are advisory and require manual engineering judgment.",
+        ]
+        context_metadata = request.context.metadata
+        if context_metadata.was_truncated:
+            omitted_warning_phrase = (
+                "1 warning was"
+                if context_metadata.omitted_warning_count == 1
+                else f"{context_metadata.omitted_warning_count} warnings were"
+            )
+            limitations.insert(
+                0,
+                (
+                    "Deterministic context limits were applied before explanation: "
+                    f"{context_metadata.included_warning_count} of "
+                    f"{context_metadata.original_warning_count} warnings were included, "
+                    f"{omitted_warning_phrase} omitted, and "
+                    f"{context_metadata.truncated_field_count} fields were truncated."
+                ),
+            )
+
         return AIExplanationResponse(
             provider_identifier=self.provider_identifier,
             provider_display_name=self.display_name,
             overall_summary=overall_summary,
             warning_explanations=warning_explanations,
-            limitations=[
-                LOCAL_MOCK_LIMITATION,
-                (
-                    "The mock provider uses only the supplied structured context and "
-                    "does not independently verify warnings or inspect CAD geometry."
-                ),
-                "All review steps are advisory and require manual engineering judgment.",
-            ],
+            limitations=limitations,
         )
 
     def _explain_warning(

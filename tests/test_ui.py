@@ -4,6 +4,8 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from model_health_assistant.presentation import AnalysisPresentation, WarningDisplayItem
 from model_health_assistant import ui
 from model_health_assistant.models import FeatureInfo, ModelHealthReport, RiskWarning
@@ -1295,6 +1297,30 @@ def test_context_preview_reuses_one_dialog_controller(monkeypatch) -> None:
     assert ui._ai_context_preview_dialog is None
 
 
+def test_context_preview_reports_builder_failure_without_opening_dialog(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        ui,
+        "_build_ai_context_preview_json",
+        lambda _report: (_ for _ in ()).throw(ValueError("malformed evidence")),
+    )
+    monkeypatch.setattr(ui, "_ai_context_preview_dialog", None)
+    monkeypatch.setattr(
+        ui,
+        "_create_ai_context_preview_dialog",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("failed context must not open a preview")
+        ),
+    )
+
+    error = ui._show_ai_context_preview(_ai_preview_report(), "qt", "parent")
+
+    assert error == (
+        "Could not build the privacy-safe context: ValueError: malformed evidence"
+    )
+
+
 def test_ai_context_preview_dialog_is_parented_read_only_and_closable() -> None:
     class FakeSignal:
         def __init__(self) -> None:
@@ -1550,6 +1576,128 @@ def test_mock_explanation_formats_zero_warning_report(monkeypatch) -> None:
     assert "Provider: Local Mock Provider (local-mock)" in controller.text
     assert "No source warnings were available to explain." in controller.text
     assert "Overall limitations:" in controller.text
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_message"),
+    [
+        (
+            "unavailable",
+            "The deterministic local test provider is unavailable.",
+        ),
+        (
+            "invalid",
+            "The deterministic local provider returned an invalid structured "
+            "response. The result was not displayed.",
+        ),
+        (
+            "context",
+            "The privacy-safe context could not be built. No explanation was "
+            "displayed.",
+        ),
+        (
+            "request",
+            "The provider-neutral explanation request could not be built. No "
+            "explanation was displayed.",
+        ),
+    ],
+)
+def test_mock_explanation_maps_controlled_failures_without_opening_dialog(
+    monkeypatch,
+    error: str,
+    expected_message: str,
+) -> None:
+    from model_health_assistant.ai_provider import (
+        AIInvalidResponseError,
+        AIProviderUnavailableError,
+    )
+    from model_health_assistant.ai_service import (
+        AIContextBuildError,
+        AIExplanationService,
+        AIRequestBuildError,
+    )
+
+    errors = {
+        "unavailable": AIProviderUnavailableError("unavailable"),
+        "invalid": AIInvalidResponseError("invalid response"),
+        "context": AIContextBuildError("context failed"),
+        "request": AIRequestBuildError("request failed"),
+    }
+    monkeypatch.setattr(
+        AIExplanationService,
+        "explain_report",
+        lambda self, report: (_ for _ in ()).throw(errors[error]),
+    )
+    monkeypatch.setattr(ui, "_mock_explanation_dialog", None)
+    monkeypatch.setattr(
+        ui,
+        "_create_mock_explanation_dialog",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("invalid output must not open an explanation dialog")
+        ),
+    )
+
+    result = ui._show_mock_explanation(_ai_preview_report(), "qt", "parent")
+
+    assert result == expected_message
+
+
+def test_ai_actions_disclose_closed_or_changed_analyzed_document_snapshot() -> None:
+    analyzed_document = object()
+
+    def context(app_module) -> ui._AnalyzedDocumentContext:
+        return ui._AnalyzedDocumentContext(
+            document=analyzed_document,
+            document_name="AnalyzedDoc",
+            app_module=app_module,
+            gui_module=SimpleNamespace(),
+        )
+
+    closed = context(
+        SimpleNamespace(
+            ActiveDocument=None,
+            getDocument=lambda _name: None,
+        )
+    )
+    changed = context(
+        SimpleNamespace(
+            ActiveDocument=object(),
+            getDocument=lambda _name: analyzed_document,
+        )
+    )
+    replaced = context(
+        SimpleNamespace(
+            ActiveDocument=object(),
+            getDocument=lambda _name: object(),
+        )
+    )
+
+    assert "no longer open" in ui._retained_analysis_state_notice(closed)
+    assert "active document has changed" in ui._retained_analysis_state_notice(changed)
+    assert "different document" in ui._retained_analysis_state_notice(replaced)
+
+    statuses = []
+    controller = ui._ResultsDialogController(
+        SimpleNamespace(),
+        {},
+        preview_ai_context_handler=lambda _report: None,
+        test_mock_explanation_handler=lambda _report: None,
+        status_label=SimpleNamespace(
+            setText=statuses.append,
+            setVisible=lambda _visible: None,
+        ),
+    )
+    controller.update_presentation(
+        _presentation(report_path=None),
+        report=_ai_preview_report(),
+        document_context=closed,
+    )
+
+    assert controller.preview_ai_context() is True
+    assert "no longer open" in statuses[-1]
+    assert "retained completed analysis snapshot" in statuses[-1]
+    assert controller.test_mock_explanation() is True
+    assert "no longer open" in statuses[-1]
 
 
 def test_mock_explanation_dialog_is_parented_read_only_and_closable() -> None:

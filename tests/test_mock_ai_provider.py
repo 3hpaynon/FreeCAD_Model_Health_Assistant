@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from model_health_assistant.ai_context import build_ai_request_context
+from model_health_assistant.ai_context import AIContextLimits, build_ai_request_context
 from model_health_assistant.ai_models import AIExplanationResponse
 from model_health_assistant.ai_prompts import build_ai_explanation_request
 from model_health_assistant.ai_provider import (
@@ -34,7 +34,11 @@ def _warning(index: int, rule_id: str, severity: str, feature_name: str) -> Risk
     )
 
 
-def _request(warnings: list[RiskWarning] | None = None):
+def _request(
+    warnings: list[RiskWarning] | None = None,
+    *,
+    limits: AIContextLimits | None = None,
+):
     source_warnings = [] if warnings is None else warnings
     features = [
         FeatureInfo(
@@ -51,7 +55,12 @@ def _request(warnings: list[RiskWarning] | None = None):
         features=features,
         warnings=source_warnings,
     )
-    return build_ai_explanation_request(build_ai_request_context(report))
+    context = (
+        build_ai_request_context(report)
+        if limits is None
+        else build_ai_request_context(report, limits=limits)
+    )
+    return build_ai_explanation_request(context)
 
 
 def test_mock_provider_conforms_and_identifies_itself() -> None:
@@ -142,6 +151,25 @@ def test_mock_provider_does_not_mutate_request() -> None:
     LocalMockAIProvider().explain(request)
 
     assert request.to_dict() == before
+
+
+def test_mock_provider_discloses_context_truncation() -> None:
+    request = _request(
+        [
+            _warning(1, "confirmed_recompute_error", "high", "Pocket001"),
+            _warning(2, "unknown_sketch_support", "low", "Sketch001"),
+        ],
+        limits=AIContextLimits(maximum_warning_count=1),
+    )
+
+    response = LocalMockAIProvider().explain(request)
+
+    assert request.context.metadata.was_truncated is True
+    assert response.limitations[0] == (
+        "Deterministic context limits were applied before explanation: 1 of 2 "
+        "warnings were included, 1 warning was omitted, and 0 fields were "
+        "truncated."
+    )
 
 
 def test_mock_provider_rejects_wrong_request_type() -> None:

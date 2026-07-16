@@ -146,6 +146,15 @@ def test_controlled_provider_error_propagates() -> None:
         ),
         (
             AIExplanationResponse(
+                provider_identifier="unsupported-future-provider",
+                provider_display_name="Unsupported Future Provider",
+                overall_summary="Summary",
+                limitations=["Limitation"],
+            ),
+            "does not match the injected provider",
+        ),
+        (
+            AIExplanationResponse(
                 provider_identifier="local-mock",
                 provider_display_name="Local Mock Provider",
                 overall_summary="Summary",

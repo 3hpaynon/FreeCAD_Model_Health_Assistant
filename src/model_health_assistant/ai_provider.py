@@ -2,6 +2,13 @@
 
 This module defines contracts only.  It contains no provider implementation,
 network behavior, credentials, FreeCAD types, or provider SDK terminology.
+
+A future real-provider adapter owns exactly six responsibilities: identity,
+availability, request translation, network execution, response translation,
+and mapping provider-specific failures to the neutral errors below.  Credential
+storage and retrieval remain a separate future component; credentials must not
+be added to the provider-neutral request, context builder, prompt builder,
+analysis engine, or FreeCAD results dialog.
 """
 
 from __future__ import annotations
@@ -48,7 +55,9 @@ class AIExplanationProvider(Protocol):
 
     Providers receive only a completed ``AIExplanationRequest``.  They never
     receive a live FreeCAD document, a report path, a raw report file, or an API
-    key from this interface.
+    key from this interface.  A future network adapter performs provider-specific
+    translation and execution inside ``explain`` and must return the shared
+    structured response or raise one of this module's neutral errors.
     """
 
     @property

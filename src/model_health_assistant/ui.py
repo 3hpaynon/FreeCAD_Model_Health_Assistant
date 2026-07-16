@@ -344,7 +344,11 @@ class _ResultsDialogController:
             self.update_status(f"AI context preview failed: {error}")
             return False
 
-        self.update_status("Opened local AI context preview. No data was transmitted.")
+        status = "Opened local AI context preview. No data was transmitted."
+        snapshot_notice = _retained_analysis_state_notice(self.document_context)
+        if snapshot_notice:
+            status += " " + snapshot_notice
+        self.update_status(status)
         return True
 
     def test_mock_explanation(self, *_args: Any) -> bool:
@@ -374,10 +378,14 @@ class _ResultsDialogController:
             self.update_status(f"Mock explanation failed: {error}")
             return False
 
-        self.update_status(
+        status = (
             "Opened deterministic local mock explanation. No AI model or network "
             "service was used."
         )
+        snapshot_notice = _retained_analysis_state_notice(self.document_context)
+        if snapshot_notice:
+            status += " " + snapshot_notice
+        self.update_status(status)
         return True
 
     def _run_report_action(self, handler: Any, success_message: str) -> bool:
@@ -1034,11 +1042,48 @@ def _show_mock_explanation(
     """Run the deterministic local provider and show its validated response."""
 
     try:
-        from model_health_assistant.ai_service import AIExplanationService
+        from model_health_assistant.ai_provider import (
+            AIInvalidResponseError,
+            AIProviderError,
+            AIProviderUnavailableError,
+        )
+        from model_health_assistant.ai_service import (
+            AIContextBuildError,
+            AIExplanationService,
+            AIRequestBuildError,
+        )
         from model_health_assistant.mock_ai_provider import LocalMockAIProvider
+    except Exception as exc:
+        return (
+            "The local explanation components are unavailable: "
+            f"{type(exc).__name__}: {exc}"
+        )
 
+    try:
         response = AIExplanationService(LocalMockAIProvider()).explain_report(report)
         explanation_text = _format_mock_explanation_response(response)
+    except AIProviderUnavailableError:
+        return "The deterministic local test provider is unavailable."
+    except AIInvalidResponseError:
+        return (
+            "The deterministic local provider returned an invalid structured "
+            "response. The result was not displayed."
+        )
+    except AIContextBuildError:
+        return (
+            "The privacy-safe context could not be built. No explanation was "
+            "displayed."
+        )
+    except AIRequestBuildError:
+        return (
+            "The provider-neutral explanation request could not be built. No "
+            "explanation was displayed."
+        )
+    except AIProviderError as exc:
+        return (
+            "The deterministic local provider rejected the request safely: "
+            f"{type(exc).__name__}: {exc}"
+        )
     except Exception as exc:
         return (
             "Could not produce the deterministic local explanation: "
@@ -1291,6 +1336,54 @@ def _select_feature_by_internal_name(
             f"{type(exc).__name__}: {exc}"
         )
     return None
+
+
+def _retained_analysis_state_notice(
+    context: _AnalyzedDocumentContext | None,
+) -> str:
+    """Describe document changes without invalidating the retained report."""
+
+    if context is None:
+        return ""
+    if not context.document_name:
+        return (
+            "The analyzed document identity is unavailable; this view uses the "
+            "retained completed analysis snapshot."
+        )
+
+    get_document = getattr(context.app_module, "getDocument", None)
+    if not callable(get_document):
+        return (
+            "The analyzed document cannot be resolved in FreeCAD; this view uses "
+            "the retained completed analysis snapshot."
+        )
+    try:
+        open_document = get_document(context.document_name)
+    except Exception:
+        open_document = None
+    if open_document is None:
+        return (
+            "The analyzed document is no longer open; this view uses the retained "
+            "completed analysis snapshot."
+        )
+    if open_document is not context.document:
+        return (
+            "A different document now uses the analyzed document name; this view "
+            "uses the retained completed analysis snapshot."
+        )
+
+    active_document = getattr(context.app_module, "ActiveDocument", context.document)
+    if active_document is None:
+        return (
+            "No document is currently active; this view uses the retained completed "
+            "analysis snapshot."
+        )
+    if active_document is not context.document:
+        return (
+            "The active document has changed since analysis; this view uses the "
+            "retained completed analysis snapshot."
+        )
+    return ""
 
 
 def _show_selection_error(qt_widgets: Any, parent: Any, message: str) -> None:
