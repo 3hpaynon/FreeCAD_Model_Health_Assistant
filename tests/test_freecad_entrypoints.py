@@ -86,8 +86,10 @@ def test_init_gui_initialize_adds_test_command_to_toolbar_and_menu(monkeypatch) 
 
     assert list(fake_gui.commands) == ["MHA_TestCommand"]
     resources = fake_gui.commands["MHA_TestCommand"].GetResources()
-    assert resources["MenuText"] == "Test Model Health Assistant"
-    assert resources["ToolTip"] == "Run a basic Model Health Assistant test command"
+    assert resources["MenuText"] == "Analyze Model Health"
+    assert resources["ToolTip"] == (
+        "Analyze the active FreeCAD document and display model health results"
+    )
     assert resources["Pixmap"] == ""
     assert toolbars == [("Model Health Assistant", ["MHA_TestCommand"])]
     assert menus == [("Model Health Assistant", ["MHA_TestCommand"])]
@@ -133,6 +135,15 @@ def test_test_command_prints_when_clicked(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "FreeCAD", fake_app)
     monkeypatch.setitem(sys.modules, "FreeCADGui", fake_gui)
 
+    from model_health_assistant import ui
+
+    shown_presentations = []
+    monkeypatch.setattr(
+        ui,
+        "show_results_dialog",
+        lambda presentation, *, gui_module=None: shown_presentations.append(presentation),
+    )
+
     module = _load_module("mha_test_init_gui_click", REPO_ROOT / "InitGui.py")
     workbench = module.ModelHealthAssistantWorkbench()
     workbench.Initialize()
@@ -142,6 +153,7 @@ def test_test_command_prints_when_clicked(monkeypatch) -> None:
     command.Activated()
 
     assert messages == ["Model Health Assistant: No active FreeCAD document is open.\n"]
+    assert shown_presentations == []
 
 
 def test_test_command_prints_active_document_name(monkeypatch, tmp_path) -> None:
@@ -166,13 +178,21 @@ def test_test_command_prints_active_document_name(monkeypatch, tmp_path) -> None
     monkeypatch.setitem(sys.modules, "FreeCAD", fake_app)
     monkeypatch.setitem(sys.modules, "FreeCADGui", fake_gui)
 
-    from model_health_assistant import report_writer
+    from model_health_assistant import report_writer, ui
 
     output_path = tmp_path / "model_health_reports" / "active_document_report.json"
     monkeypatch.setattr(
         report_writer,
         "build_report_path",
         lambda document_name, document_file_name, generated_at: output_path,
+    )
+    shown_presentations = []
+    monkeypatch.setattr(
+        ui,
+        "show_results_dialog",
+        lambda presentation, *, gui_module=None: shown_presentations.append(
+            (presentation, gui_module)
+        ),
     )
 
     module = _load_module("mha_test_init_gui_active_document", REPO_ROOT / "InitGui.py")
@@ -203,6 +223,15 @@ def test_test_command_prints_active_document_name(monkeypatch, tmp_path) -> None
         + "\n------------------------------------------------------------------------------------\n"
     ]
     assert output_path.exists()
+    assert len(shown_presentations) == 1
+    presentation, passed_gui = shown_presentations[0]
+    assert presentation.document_name == "Mechanical-EM Coupler Clutch Practice Model"
+    assert presentation.health_score == 100
+    assert presentation.meaningful_modeling_feature_count == 0
+    assert presentation.total_sketch_count == 0
+    assert presentation.total_warning_count == 0
+    assert presentation.report_path == output_path
+    assert passed_gui is fake_gui
 
 
 def test_test_command_prints_extracted_feature_and_sketch_counts(monkeypatch, tmp_path) -> None:

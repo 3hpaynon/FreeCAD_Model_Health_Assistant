@@ -42,148 +42,46 @@ class ModelHealthAssistantWorkbench(BaseWorkbench):
         class _TestCommand:
             def GetResources(self):  # noqa: N802
                 return {
-                    "MenuText": "Test Model Health Assistant",
-                    "ToolTip": "Run a basic Model Health Assistant test command",
+                    "MenuText": "Analyze Model Health",
+                    "ToolTip": (
+                        "Analyze the active FreeCAD document and display model health results"
+                    ),
                     "Pixmap": "",
                 }
 
             def Activated(self):  # noqa: N802
-                document = getattr(App, "ActiveDocument", None) if App is not None else None
-                if document is None:
-                    message = "Model Health Assistant: No active FreeCAD document is open.\n"
-                else:
-                    document_name = (
-                        getattr(document, "Label", None)
-                        or getattr(document, "Name", None)
-                        or "Untitled"
+                try:
+                    from model_health_assistant.ui import run_analysis_command
+                except ImportError as exc:
+                    message = (
+                        "Model Health Assistant: Could not load the local UI: "
+                        + type(exc).__name__
+                        + ": "
+                        + str(exc)
+                        + "\n"
                     )
+                except Exception as exc:
+                    message = (
+                        "Model Health Assistant: UI initialization failed: "
+                        + type(exc).__name__
+                        + ": "
+                        + str(exc)
+                        + "\n"
+                    )
+                else:
                     try:
-                        from model_health_assistant.extractor import extract_document_features
-
-                        features = extract_document_features(document)
-                    except ImportError as exc:
-                        message = (
-                            "Model Health Assistant: Could not load the local extractor: "
-                            + type(exc).__name__
-                            + ": "
-                            + str(exc)
-                            + "\n"
-                        )
+                        run_analysis_command(app_module=App, gui_module=Gui)
                     except Exception as exc:
                         message = (
-                            "Model Health Assistant: Extractor failed: "
+                            "Model Health Assistant: Analysis command failed: "
                             + type(exc).__name__
                             + ": "
                             + str(exc)
                             + "\n"
                         )
                     else:
-                        try:
-                            from model_health_assistant.risk_engine import analyze_model_health
+                        return
 
-                            report = analyze_model_health(
-                                features,
-                                document_name=str(document_name),
-                            )
-                        except ImportError as exc:
-                            message = (
-                                "Model Health Assistant: Could not load the local risk engine: "
-                                + type(exc).__name__
-                                + ": "
-                                + str(exc)
-                                + "\n"
-                            )
-                        except Exception as exc:
-                            message = (
-                                "Model Health Assistant: Risk engine failed: "
-                                + type(exc).__name__
-                                + ": "
-                                + str(exc)
-                                + "\n"
-                            )
-                        else:
-                            try:
-                                from model_health_assistant.report_writer import (
-                                    build_report_path,
-                                    save_report_json,
-                                )
-
-                                output_path = build_report_path(
-                                    str(getattr(document, "Name", None) or document_name),
-                                    str(getattr(document, "FileName", "") or ""),
-                                    report.generated_at,
-                                )
-                                saved_path = save_report_json(report, output_path)
-                                severity_counts = report.warning_counts_by_severity
-                                severity_rank = {"high": 0, "medium": 1, "low": 2}
-                                top_warnings = sorted(
-                                    report.warnings,
-                                    key=lambda warning: severity_rank.get(
-                                        warning.severity,
-                                        3,
-                                    ),
-                                )[:3]
-                                top_issues = "\n".join(
-                                    str(index) + ". " + warning.message
-                                    for index, warning in enumerate(top_warnings, start=1)
-                                )
-                                if not top_issues:
-                                    top_issues = "None."
-                                message = (
-                                    "------------------------------------------------------------------------------------\n"
-                                    + "Model Health Assistant Analysis\n\n"
-                                    + "Document: "
-                                    + report.document_name
-                                    + "\n"
-                                    + "Document objects: "
-                                    + str(report.total_document_object_count)
-                                    + "\n"
-                                    + "Meaningful modeling features: "
-                                    + str(report.meaningful_modeling_feature_count)
-                                    + "\n"
-                                    + "Sketches: "
-                                    + str(report.total_sketch_count)
-                                    + "\n\n"
-                                    + "Warnings:\n"
-                                    + "High: "
-                                    + str(severity_counts["high"])
-                                    + "\n"
-                                    + "Medium: "
-                                    + str(severity_counts["medium"])
-                                    + "\n"
-                                    + "Low: "
-                                    + str(severity_counts["low"])
-                                    + "\n"
-                                    + "Total: "
-                                    + str(report.total_warning_count)
-                                    + "\n\n"
-                                    + "Health score: "
-                                    + str(report.health_score)
-                                    + "/100\n\n"
-                                    + "Top issues:\n\n"
-                                    + top_issues
-                                    + "\n\n"
-                                    + "Report:\n"
-                                    + str(saved_path)
-                                    + "\n"
-                                    + "------------------------------------------------------------------------------------\n"
-                                )
-                            except ImportError as exc:
-                                message = (
-                                    "Model Health Assistant: Could not load the local report writer: "
-                                    + type(exc).__name__
-                                    + ": "
-                                    + str(exc)
-                                    + "\n"
-                                )
-                            except Exception as exc:
-                                message = (
-                                    "Model Health Assistant: Report writing failed: "
-                                    + type(exc).__name__
-                                    + ": "
-                                    + str(exc)
-                                    + "\n"
-                                )
                 try:
                     if App is not None and hasattr(App, "Console"):
                         App.Console.PrintMessage(message)
