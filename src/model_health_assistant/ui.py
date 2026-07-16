@@ -88,6 +88,12 @@ class _ResultsDialogController:
         warning_details: Any | None = None,
         select_feature_button: Any | None = None,
         selection_error_handler: Any | None = None,
+        open_report_folder_button: Any | None = None,
+        copy_report_path_button: Any | None = None,
+        open_report_folder_handler: Any | None = None,
+        copy_report_path_handler: Any | None = None,
+        report_action_error_handler: Any | None = None,
+        refresh_analysis_button: Any | None = None,
     ) -> None:
         self.dialog = dialog
         self.value_labels = value_labels
@@ -98,8 +104,15 @@ class _ResultsDialogController:
         self.warning_details = warning_details
         self.select_feature_button = select_feature_button
         self.selection_error_handler = selection_error_handler
+        self.open_report_folder_button = open_report_folder_button
+        self.copy_report_path_button = copy_report_path_button
+        self.open_report_folder_handler = open_report_folder_handler
+        self.copy_report_path_handler = copy_report_path_handler
+        self.report_action_error_handler = report_action_error_handler
+        self.refresh_analysis_button = refresh_analysis_button
         self.warning_items: tuple[WarningDisplayItem, ...] = ()
         self.document_context: _AnalyzedDocumentContext | None = None
+        self.report_path: Path | None = None
 
     def update_presentation(
         self,
@@ -123,6 +136,9 @@ class _ResultsDialogController:
             else "Not available"
         )
         self.value_labels["report"].setText(report_text)
+        self.report_path = presentation.report_path
+        _, report_path_error = _validated_report_path(self.report_path)
+        self._set_report_actions_enabled(report_path_error is None)
         self._update_warning_table(presentation)
 
     def _update_warning_table(self, presentation: AnalysisPresentation) -> None:
@@ -207,6 +223,73 @@ class _ResultsDialogController:
         _print_message(f"Model Health Assistant: {error}\n", app_module)
         return False
 
+    def open_report_folder(self, *_args: Any) -> bool:
+        """Open only the directory containing the current saved JSON report."""
+
+        return self._run_report_action(
+            self.open_report_folder_handler,
+            "Opened report folder.",
+        )
+
+    def copy_report_path(self, *_args: Any) -> bool:
+        """Copy the complete current JSON report path, never its contents."""
+
+        return self._run_report_action(
+            self.copy_report_path_handler,
+            "Copied report path to the clipboard.",
+        )
+
+    def refresh_analysis(self, *_args: Any) -> bool:
+        """Run the existing synchronous pipeline once for the active document."""
+
+        app_module = (
+            self.document_context.app_module
+            if self.document_context is not None
+            else App
+        )
+        gui_module = (
+            self.document_context.gui_module
+            if self.document_context is not None
+            else Gui
+        )
+        return (
+            run_analysis_command(
+                app_module=app_module,
+                gui_module=gui_module,
+            )
+            is not None
+        )
+
+    def _run_report_action(self, handler: Any, success_message: str) -> bool:
+        report_path, error = _validated_report_path(self.report_path)
+        if error is None and not callable(handler):
+            error = "This report action is unavailable in the current Qt runtime."
+        if error is None and report_path is not None:
+            try:
+                error = handler(report_path)
+            except Exception as exc:
+                error = (
+                    "The report action failed safely: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+        if error is not None:
+            self._set_report_actions_enabled(False)
+            if callable(self.report_action_error_handler):
+                self.report_action_error_handler(error)
+            self._print_report_action_message(error)
+            return False
+
+        self._print_report_action_message(success_message)
+        return True
+
+    def _print_report_action_message(self, message: str) -> None:
+        app_module = (
+            self.document_context.app_module
+            if self.document_context is not None
+            else App
+        )
+        _print_message(f"Model Health Assistant: {message}\n", app_module)
+
     def _selected_warning(self) -> WarningDisplayItem | None:
         if self.warning_table is None:
             return None
@@ -241,6 +324,18 @@ class _ResultsDialogController:
         set_enabled = getattr(self.select_feature_button, "setEnabled", None)
         if callable(set_enabled):
             set_enabled(enabled)
+
+    def _set_report_actions_enabled(self, enabled: bool) -> None:
+        buttons_and_handlers = (
+            (self.open_report_folder_button, self.open_report_folder_handler),
+            (self.copy_report_path_button, self.copy_report_path_handler),
+        )
+        for button, handler in buttons_and_handlers:
+            if button is None:
+                continue
+            set_enabled = getattr(button, "setEnabled", None)
+            if callable(set_enabled):
+                set_enabled(enabled and callable(handler))
 
     def show(self) -> None:
         """Show and foreground the existing non-modal dialog."""
@@ -498,6 +593,17 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     layout.addWidget(warning_details)
 
     button_layout = qt_widgets.QHBoxLayout()
+    refresh_analysis_button = qt_widgets.QPushButton("Refresh Analysis", dialog)
+    button_layout.addWidget(refresh_analysis_button)
+    open_report_folder_button = qt_widgets.QPushButton(
+        "Open Report Folder",
+        dialog,
+    )
+    open_report_folder_button.setEnabled(False)
+    button_layout.addWidget(open_report_folder_button)
+    copy_report_path_button = qt_widgets.QPushButton("Copy Report Path", dialog)
+    copy_report_path_button.setEnabled(False)
+    button_layout.addWidget(copy_report_path_button)
     select_feature_button = qt_widgets.QPushButton("Select Feature", dialog)
     select_feature_button.setEnabled(False)
     button_layout.addWidget(select_feature_button)
@@ -506,6 +612,27 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     close_button.clicked.connect(dialog.close)
     button_layout.addWidget(close_button)
     layout.addLayout(button_layout)
+
+    qt_services = _load_qt_services()
+    open_report_folder_handler = None
+    copy_report_path_handler = None
+    if qt_services is not None:
+        qt_core, qt_gui = qt_services
+        open_report_folder_handler = lambda path: _open_report_folder_with_qt(
+            path,
+            qt_core,
+            qt_gui,
+        )
+        clipboard_method = getattr(
+            getattr(qt_widgets, "QApplication", None),
+            "clipboard",
+            None,
+        )
+        if callable(clipboard_method):
+            copy_report_path_handler = lambda path: _copy_report_path_to_clipboard(
+                path,
+                clipboard_method(),
+            )
 
     controller = _ResultsDialogController(
         dialog,
@@ -521,11 +648,22 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
             dialog,
             message,
         ),
+        open_report_folder_button=open_report_folder_button,
+        copy_report_path_button=copy_report_path_button,
+        open_report_folder_handler=open_report_folder_handler,
+        copy_report_path_handler=copy_report_path_handler,
+        report_action_error_handler=lambda message: _show_selection_error(
+            qt_widgets,
+            dialog,
+            message,
+        ),
+        refresh_analysis_button=refresh_analysis_button,
     )
-    warning_table.itemSelectionChanged.connect(
-        controller.update_selected_warning_details
-    )
+    _connect_warning_table_actions(warning_table, controller)
     select_feature_button.clicked.connect(controller.select_selected_feature)
+    open_report_folder_button.clicked.connect(controller.open_report_folder)
+    copy_report_path_button.clicked.connect(controller.copy_report_path)
+    refresh_analysis_button.clicked.connect(controller.refresh_analysis)
     destroyed_signal = getattr(dialog, "destroyed", None)
     if destroyed_signal is not None and hasattr(destroyed_signal, "connect"):
         destroyed_signal.connect(
@@ -534,6 +672,18 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
             )
         )
     return controller
+
+
+def _connect_warning_table_actions(
+    warning_table: Any,
+    controller: _ResultsDialogController,
+) -> None:
+    """Keep single-click details and double-click selection behavior distinct."""
+
+    warning_table.itemSelectionChanged.connect(
+        controller.update_selected_warning_details
+    )
+    warning_table.itemDoubleClicked.connect(controller.select_selected_feature)
 
 
 def _configure_warning_table(qt_widgets: Any, warning_table: Any) -> None:
@@ -628,6 +778,55 @@ def _show_selection_error(qt_widgets: Any, parent: Any, message: str) -> None:
         show_warning(parent, "Model Health Assistant", message)
 
 
+def _validated_report_path(
+    report_path: str | Path | None,
+) -> tuple[Path | None, str | None]:
+    """Return an absolute existing JSON-file path or a friendly local error."""
+
+    if report_path is None or not str(report_path).strip():
+        return None, "No saved report path is available."
+    try:
+        path = Path(report_path).expanduser().resolve(strict=True)
+        is_file = path.is_file()
+    except (OSError, RuntimeError, ValueError):
+        return None, "The saved report file has been moved, deleted, or is unavailable."
+    if not is_file:
+        return None, "The saved report path does not identify a file."
+    return path, None
+
+
+def _open_report_folder_with_qt(
+    report_path: Path,
+    qt_core: Any,
+    qt_gui: Any,
+) -> str | None:
+    """Ask Qt to open a local directory URL without opening the JSON report."""
+
+    q_url = getattr(qt_core, "QUrl", None)
+    from_local_file = getattr(q_url, "fromLocalFile", None)
+    desktop_services = getattr(qt_gui, "QDesktopServices", None)
+    open_url = getattr(desktop_services, "openUrl", None)
+    if not callable(from_local_file) or not callable(open_url):
+        return "Opening local report folders is unavailable in this Qt runtime."
+    folder_url = from_local_file(str(report_path.parent))
+    if open_url(folder_url) is False:
+        return "The operating system could not open the report folder."
+    return None
+
+
+def _copy_report_path_to_clipboard(
+    report_path: Path,
+    clipboard: Any,
+) -> str | None:
+    """Copy only a complete filesystem path to the Qt clipboard."""
+
+    set_text = getattr(clipboard, "setText", None)
+    if not callable(set_text):
+        return "The clipboard is unavailable in the current Qt runtime."
+    set_text(str(report_path))
+    return None
+
+
 def _format_warning_details(warning: WarningDisplayItem) -> str:
     """Format stored warning facts without inferring unavailable information."""
 
@@ -701,6 +900,20 @@ def _load_qt_widgets() -> Any | None:
             from PySide import QtGui as QtWidgets  # type: ignore
 
             return QtWidgets
+        except Exception:
+            return None
+
+
+def _load_qt_services() -> tuple[Any, Any] | None:
+    try:  # pragma: no cover - depends on FreeCAD's bundled Qt runtime.
+        from PySide2 import QtCore, QtGui  # type: ignore
+
+        return QtCore, QtGui
+    except Exception:  # pragma: no cover
+        try:
+            from PySide import QtCore, QtGui  # type: ignore
+
+            return QtCore, QtGui
         except Exception:
             return None
 

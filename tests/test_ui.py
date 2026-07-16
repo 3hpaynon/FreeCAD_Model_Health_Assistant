@@ -185,6 +185,202 @@ def test_results_dialog_controller_marks_missing_report_path() -> None:
     assert values["report"] == "Not available"
 
 
+def test_report_path_actions_revalidate_and_report_feedback(tmp_path) -> None:
+    report_file = tmp_path / "model_health.json"
+    report_file.write_text("{}", encoding="utf-8")
+    messages = []
+    errors = []
+    opened_paths = []
+    copied_paths = []
+
+    class FakeButton:
+        def __init__(self) -> None:
+            self.enabled = None
+
+        def setEnabled(self, enabled: bool) -> None:  # noqa: N802 - mirrors Qt.
+            self.enabled = enabled
+
+    class FakeConsole:
+        @staticmethod
+        def PrintMessage(message: str) -> None:  # noqa: N802 - mirrors FreeCAD.
+            messages.append(message)
+
+    labels = {
+        key: SimpleNamespace(setText=lambda _text: None)
+        for key in (
+            "document",
+            "score",
+            "meaningful_features",
+            "sketches",
+            "warnings",
+            "report",
+        )
+    }
+    open_button = FakeButton()
+    copy_button = FakeButton()
+    context = ui._AnalyzedDocumentContext(
+        object(),
+        "Demo",
+        SimpleNamespace(Console=FakeConsole),
+        SimpleNamespace(),
+    )
+    controller = ui._ResultsDialogController(
+        SimpleNamespace(),
+        labels,
+        open_report_folder_button=open_button,
+        copy_report_path_button=copy_button,
+        open_report_folder_handler=lambda path: opened_paths.append(path),
+        copy_report_path_handler=lambda path: copied_paths.append(path),
+        report_action_error_handler=errors.append,
+    )
+
+    controller.update_presentation(
+        _presentation(report_path=report_file),
+        document_context=context,
+    )
+
+    complete_path = report_file.resolve()
+    assert open_button.enabled is True
+    assert copy_button.enabled is True
+    assert controller.open_report_folder() is True
+    assert controller.copy_report_path() is True
+    assert opened_paths == [complete_path]
+    assert copied_paths == [complete_path]
+    assert messages[-2:] == [
+        "Model Health Assistant: Opened report folder.\n",
+        "Model Health Assistant: Copied report path to the clipboard.\n",
+    ]
+
+    report_file.unlink()
+    assert controller.open_report_folder() is False
+    assert open_button.enabled is False
+    assert copy_button.enabled is False
+    assert errors == [
+        "The saved report file has been moved, deleted, or is unavailable."
+    ]
+    assert messages[-1] == (
+        "Model Health Assistant: The saved report file has been moved, deleted, "
+        "or is unavailable.\n"
+    )
+
+
+def test_local_report_helpers_open_only_folder_and_copy_complete_path(tmp_path) -> None:
+    report_file = tmp_path / "nested" / "report.json"
+    report_file.parent.mkdir()
+    report_file.write_text("{}", encoding="utf-8")
+    complete_path, error = ui._validated_report_path(report_file)
+    assert error is None
+    assert complete_path == report_file.resolve()
+
+    opened_urls = []
+
+    class FakeUrl:
+        @staticmethod
+        def fromLocalFile(path: str):  # noqa: N802 - mirrors Qt.
+            return ("local-directory", path)
+
+    qt_core = SimpleNamespace(QUrl=FakeUrl)
+    qt_gui = SimpleNamespace(
+        QDesktopServices=SimpleNamespace(
+            openUrl=lambda url: opened_urls.append(url) or True
+        )
+    )
+    assert ui._open_report_folder_with_qt(complete_path, qt_core, qt_gui) is None
+    assert opened_urls == [("local-directory", str(report_file.parent.resolve()))]
+
+    copied_text = []
+    clipboard = SimpleNamespace(setText=copied_text.append)
+    assert ui._copy_report_path_to_clipboard(complete_path, clipboard) is None
+    assert copied_text == [str(report_file.resolve())]
+
+    assert ui._validated_report_path(None) == (
+        None,
+        "No saved report path is available.",
+    )
+
+
+def test_refresh_analysis_runs_existing_pipeline_once_for_current_active_document(
+    monkeypatch,
+) -> None:
+    previous_document = object()
+    current_document = object()
+    app_module = SimpleNamespace(ActiveDocument=current_document)
+    gui_module = SimpleNamespace()
+    context = ui._AnalyzedDocumentContext(
+        previous_document,
+        "Previous",
+        app_module,
+        gui_module,
+    )
+    calls = []
+
+    def fake_run_analysis_command(*, app_module=None, gui_module=None):
+        calls.append((app_module, gui_module, app_module.ActiveDocument))
+        return _presentation(document_name="Current")
+
+    monkeypatch.setattr(ui, "run_analysis_command", fake_run_analysis_command)
+    labels = {
+        key: SimpleNamespace(setText=lambda _text: None)
+        for key in (
+            "document",
+            "score",
+            "meaningful_features",
+            "sketches",
+            "warnings",
+            "report",
+        )
+    }
+    controller = ui._ResultsDialogController(SimpleNamespace(), labels)
+    controller.document_context = context
+
+    assert controller.refresh_analysis(object()) is True
+    assert calls == [(app_module, gui_module, current_document)]
+
+
+def test_refresh_with_no_active_document_preserves_previous_results() -> None:
+    messages = []
+    values = {}
+
+    class FakeConsole:
+        @staticmethod
+        def PrintMessage(message: str) -> None:  # noqa: N802 - mirrors FreeCAD.
+            messages.append(message)
+
+    app_module = SimpleNamespace(ActiveDocument=None, Console=FakeConsole)
+    context = ui._AnalyzedDocumentContext(
+        object(),
+        "Previous",
+        app_module,
+        SimpleNamespace(),
+    )
+    labels = {
+        key: SimpleNamespace(
+            setText=lambda text, key=key: values.update({key: text})
+        )
+        for key in (
+            "document",
+            "score",
+            "meaningful_features",
+            "sketches",
+            "warnings",
+            "report",
+        )
+    }
+    controller = ui._ResultsDialogController(SimpleNamespace(), labels)
+    controller.update_presentation(
+        _presentation(document_name="Previous", score=77, report_path=None),
+        document_context=context,
+    )
+    previous_values = dict(values)
+
+    assert controller.refresh_analysis() is False
+    assert values == previous_values
+    assert controller.document_context is context
+    assert messages == [
+        "Model Health Assistant: No active FreeCAD document is open.\n"
+    ]
+
+
 def test_warning_table_is_read_only_and_selects_single_rows() -> None:
     calls = {}
 
@@ -741,6 +937,7 @@ def test_select_feature_button_tracks_selection_and_replaced_document_context() 
     table.selected_row = 0
     controller.update_selected_warning_details()
     assert button.enabled is True
+    assert selection_calls == []
     assert controller.select_selected_feature() is True
     assert selection_calls[-2:] == ["clear", ("DocA", "FeatureA")]
 
@@ -763,3 +960,33 @@ def test_select_feature_button_tracks_selection_and_replaced_document_context() 
         "Model Health Assistant: The analyzed document is no longer open.\n"
     )
     assert friendly_messages == ["The analyzed document is no longer open."]
+
+
+def test_warning_table_double_click_reuses_selection_action() -> None:
+    class FakeSignal:
+        def __init__(self) -> None:
+            self.callback = None
+
+        def connect(self, callback) -> None:
+            self.callback = callback
+
+        def emit(self, *args) -> None:
+            assert self.callback is not None
+            self.callback(*args)
+
+    table = SimpleNamespace(
+        itemSelectionChanged=FakeSignal(),
+        itemDoubleClicked=FakeSignal(),
+    )
+    calls = []
+    controller = SimpleNamespace(
+        update_selected_warning_details=lambda: calls.append("details"),
+        select_selected_feature=lambda *_args: calls.append("select"),
+    )
+
+    ui._connect_warning_table_actions(table, controller)
+    table.itemSelectionChanged.emit()
+    assert calls == ["details"]
+
+    table.itemDoubleClicked.emit(object())
+    assert calls == ["details", "select"]
