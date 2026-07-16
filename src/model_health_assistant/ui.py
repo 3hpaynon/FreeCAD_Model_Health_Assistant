@@ -33,7 +33,12 @@ except Exception:  # pragma: no cover - expected in normal unit tests.
 COMMAND_NAME = "MHA_AnalyzeFeatureTree"
 
 _WARNING_TABLE_HEADERS = ("Severity", "Feature", "Rule", "Warning")
+_WARNING_COLUMN_WIDTHS = (85, 170, 190)
 _NO_WARNINGS_MESSAGE = "No model-health warnings were generated."
+_HEALTH_SCORE_DISCLAIMER = (
+    "The health score is a rule-based engineering aid and does not guarantee "
+    "that the model is error-free."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +99,7 @@ class _ResultsDialogController:
         copy_report_path_handler: Any | None = None,
         report_action_error_handler: Any | None = None,
         refresh_analysis_button: Any | None = None,
+        status_label: Any | None = None,
     ) -> None:
         self.dialog = dialog
         self.value_labels = value_labels
@@ -110,6 +116,7 @@ class _ResultsDialogController:
         self.copy_report_path_handler = copy_report_path_handler
         self.report_action_error_handler = report_action_error_handler
         self.refresh_analysis_button = refresh_analysis_button
+        self.status_label = status_label
         self.warning_items: tuple[WarningDisplayItem, ...] = ()
         self.document_context: _AnalyzedDocumentContext | None = None
         self.report_path: Path | None = None
@@ -119,27 +126,33 @@ class _ResultsDialogController:
         presentation: AnalysisPresentation,
         *,
         document_context: _AnalyzedDocumentContext | None = None,
+        status_message: str = "",
     ) -> None:
         """Replace every displayed summary value."""
 
         self.document_context = document_context
-        self.value_labels["document"].setText(presentation.document_name)
-        self.value_labels["score"].setText(f"{presentation.health_score}/100")
-        self.value_labels["meaningful_features"].setText(
-            str(presentation.meaningful_modeling_feature_count)
-        )
-        self.value_labels["sketches"].setText(str(presentation.total_sketch_count))
-        self.value_labels["warnings"].setText(str(presentation.total_warning_count))
-        report_text = (
-            str(presentation.report_path)
-            if presentation.report_path is not None
-            else "Not available"
-        )
-        self.value_labels["report"].setText(report_text)
+        for key, text in _summary_display_values(presentation).items():
+            label = self.value_labels.get(key)
+            set_text = getattr(label, "setText", None)
+            if callable(set_text):
+                set_text(text)
         self.report_path = presentation.report_path
         _, report_path_error = _validated_report_path(self.report_path)
         self._set_report_actions_enabled(report_path_error is None)
+        self.update_status(status_message)
         self._update_warning_table(presentation)
+
+    def update_status(self, message: str) -> None:
+        """Display one concise user-facing state without technical traceback text."""
+
+        if self.status_label is None:
+            return
+        set_text = getattr(self.status_label, "setText", None)
+        if callable(set_text):
+            set_text(message)
+        set_visible = getattr(self.status_label, "setVisible", None)
+        if callable(set_visible):
+            set_visible(bool(message))
 
     def _update_warning_table(self, presentation: AnalysisPresentation) -> None:
         self.warning_items = tuple(presentation.warning_items)
@@ -213,6 +226,7 @@ class _ResultsDialogController:
             return True
 
         self._set_select_feature_enabled(False)
+        self.update_status(f"Selection failed: {error}")
         if callable(self.selection_error_handler):
             self.selection_error_handler(error)
         app_module = (
@@ -274,6 +288,7 @@ class _ResultsDialogController:
                 )
         if error is not None:
             self._set_report_actions_enabled(False)
+            self.update_status(f"Report action failed: {error}")
             if callable(self.report_action_error_handler):
                 self.report_action_error_handler(error)
             self._print_report_action_message(error)
@@ -374,9 +389,13 @@ def run_analysis_command(
         getattr(active_app, "ActiveDocument", None) if active_app is not None else None
     )
     if document is None:
-        _print_message(
-            "Model Health Assistant: No active FreeCAD document is open.\n",
-            active_app,
+        technical_message = (
+            "Model Health Assistant: No active FreeCAD document is open.\n"
+        )
+        _print_message(technical_message, active_app)
+        _show_results_error(
+            "No active FreeCAD document is open. Previous results were preserved.",
+            active_gui,
         )
         return None
 
@@ -391,16 +410,20 @@ def run_analysis_command(
 
         features = extractor.extract_document_features(document)
     except ImportError as exc:
-        _print_message(
-            _failure_message(
-                "Could not load the local extractor",
-                exc,
-            ),
+        _publish_analysis_failure(
+            "Analysis could not start because the local extractor is unavailable.",
+            _failure_message("Could not load the local extractor", exc),
             active_app,
+            active_gui,
         )
         return None
     except Exception as exc:
-        _print_message(_failure_message("Extractor failed", exc), active_app)
+        _publish_analysis_failure(
+            "Analysis failed while reading the active document.",
+            _failure_message("Extractor failed", exc),
+            active_app,
+            active_gui,
+        )
         return None
 
     try:
@@ -411,18 +434,24 @@ def run_analysis_command(
             document_name=document_name,
         )
     except ImportError as exc:
-        _print_message(
-            _failure_message(
-                "Could not load the local risk engine",
-                exc,
-            ),
+        _publish_analysis_failure(
+            "Analysis could not continue because the local risk engine is unavailable.",
+            _failure_message("Could not load the local risk engine", exc),
             active_app,
+            active_gui,
         )
         return None
     except Exception as exc:
-        _print_message(_failure_message("Risk engine failed", exc), active_app)
+        _publish_analysis_failure(
+            "Analysis failed before warnings could be generated.",
+            _failure_message("Risk engine failed", exc),
+            active_app,
+            active_gui,
+        )
         return None
 
+    saved_path: str | Path | None = None
+    report_failure_message = ""
     try:
         from model_health_assistant import report_writer
 
@@ -432,21 +461,21 @@ def run_analysis_command(
             report.generated_at,
         )
         saved_path = report_writer.save_report_json(report, output_path)
-        message = _format_report_view_summary(report, saved_path)
     except ImportError as exc:
+        report_failure_message = (
+            "Analysis completed, but the local JSON report writer is unavailable."
+        )
         _print_message(
-            _failure_message(
-                "Could not load the local report writer",
-                exc,
-            ),
+            _failure_message("Could not load the local report writer", exc),
             active_app,
         )
-        return None
     except Exception as exc:
+        report_failure_message = (
+            "Analysis completed, but the JSON report could not be written."
+        )
         _print_message(_failure_message("Report writing failed", exc), active_app)
-        return None
 
-    _print_message(message, active_app)
+    _print_message(_format_report_view_summary(report, saved_path), active_app)
     presentation = None
     try:
         presentation = build_analysis_presentation(report, saved_path)
@@ -460,6 +489,10 @@ def run_analysis_command(
             presentation,
             gui_module=active_gui,
             document_context=document_context,
+            status_message=_presentation_status_message(
+                presentation,
+                report_failure_message=report_failure_message,
+            ),
         )
     except Exception as exc:  # pragma: no cover - defensive FreeCAD runtime boundary.
         _print_error(_failure_message("Results dialog failed", exc), active_app)
@@ -471,6 +504,7 @@ def show_results_dialog(
     *,
     gui_module: Any | None = None,
     document_context: _AnalyzedDocumentContext | None = None,
+    status_message: str = "",
 ) -> bool:
     """Create or update the single parented, non-modal results dialog."""
 
@@ -490,14 +524,64 @@ def show_results_dialog(
     _results_dialog.update_presentation(
         presentation,
         document_context=document_context,
+        status_message=status_message,
     )
     _results_dialog.show()
     return True
 
 
+def _publish_analysis_failure(
+    user_message: str,
+    technical_message: str,
+    app_module: Any | None,
+    gui_module: Any | None,
+) -> None:
+    """Keep concise UI text separate from technical Report View diagnostics."""
+
+    _print_message(technical_message, app_module)
+    _show_results_error(user_message, gui_module)
+
+
+def _show_results_error(message: str, gui_module: Any | None) -> bool:
+    """Update an open results dialog, or use a parented warning when none exists."""
+
+    if _results_dialog is not None:
+        _results_dialog.update_status(message)
+        _results_dialog.show()
+        return True
+
+    parent = _main_window(gui_module)
+    qt_widgets = _load_qt_widgets() if parent is not None else None
+    if qt_widgets is None:
+        return False
+    _show_selection_error(qt_widgets, parent, message)
+    return True
+
+
+def _presentation_status_message(
+    presentation: AnalysisPresentation,
+    *,
+    report_failure_message: str = "",
+) -> str:
+    """Convert successful partial/empty outcomes into concise interface text."""
+
+    if report_failure_message:
+        return report_failure_message
+    if presentation.total_document_object_count == 0:
+        return "Analysis completed. The active document is empty."
+    if presentation.meaningful_modeling_feature_count == 0:
+        return "Analysis completed. No meaningful modeling features were found."
+    if presentation.total_warning_count == 0:
+        return (
+            "Analysis completed with no generated warnings. "
+            "This does not guarantee that the model is error-free."
+        )
+    return ""
+
+
 def _format_report_view_summary(
     report: ModelHealthReport,
-    saved_path: str | Path,
+    saved_path: str | Path | None,
 ) -> str:
     severity_counts = report.warning_counts_by_severity
     severity_rank = {"high": 0, "medium": 1, "low": 2}
@@ -547,7 +631,7 @@ def _format_report_view_summary(
         + top_issues
         + "\n\n"
         + "Report:\n"
-        + str(saved_path)
+        + (str(saved_path) if saved_path is not None else "Not available")
         + "\n"
         + "------------------------------------------------------------------------------------\n"
     )
@@ -557,18 +641,26 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     dialog = qt_widgets.QDialog(parent)
     dialog.setWindowTitle("Model Health Assistant Results")
     dialog.setModal(False)
+    dialog.setMinimumSize(760, 560)
 
     layout = qt_widgets.QVBoxLayout(dialog)
+    if hasattr(layout, "setSpacing"):
+        layout.setSpacing(8)
     form_layout = qt_widgets.QFormLayout()
     layout.addLayout(form_layout)
 
     value_labels: dict[str, Any] = {}
     rows = (
         ("document", "Document:"),
+        ("timestamp", "Analysis timestamp:"),
         ("score", "Health score:"),
+        ("document_objects", "Document objects:"),
         ("meaningful_features", "Meaningful modeling features:"),
         ("sketches", "Sketches:"),
         ("warnings", "Total warnings:"),
+        ("high_warnings", "High-severity warnings:"),
+        ("medium_warnings", "Medium-severity warnings:"),
+        ("low_warnings", "Low-severity warnings:"),
         ("report", "Report:"),
     )
     for key, caption in rows:
@@ -577,6 +669,12 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
             value_label.setWordWrap(True)
         value_labels[key] = value_label
         form_layout.addRow(caption, value_label)
+
+    status_label = qt_widgets.QLabel("", dialog)
+    if hasattr(status_label, "setWordWrap"):
+        status_label.setWordWrap(True)
+    status_label.setVisible(False)
+    layout.addWidget(status_label)
 
     warning_table = qt_widgets.QTableWidget(dialog)
     _configure_warning_table(qt_widgets, warning_table)
@@ -590,25 +688,37 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     layout.addWidget(details_label)
     warning_details = qt_widgets.QPlainTextEdit(dialog)
     warning_details.setReadOnly(True)
+    warning_details.setMinimumHeight(140)
     layout.addWidget(warning_details)
+
+    disclaimer_label = qt_widgets.QLabel(_HEALTH_SCORE_DISCLAIMER, dialog)
+    if hasattr(disclaimer_label, "setWordWrap"):
+        disclaimer_label.setWordWrap(True)
+    layout.addWidget(disclaimer_label)
+
+    set_stretch_factor = getattr(layout, "setStretchFactor", None)
+    if callable(set_stretch_factor):
+        set_stretch_factor(warning_table, 3)
+        set_stretch_factor(warning_details, 2)
 
     button_layout = qt_widgets.QHBoxLayout()
     refresh_analysis_button = qt_widgets.QPushButton("Refresh Analysis", dialog)
-    button_layout.addWidget(refresh_analysis_button)
     open_report_folder_button = qt_widgets.QPushButton(
         "Open Report Folder",
         dialog,
     )
     open_report_folder_button.setEnabled(False)
-    button_layout.addWidget(open_report_folder_button)
     copy_report_path_button = qt_widgets.QPushButton("Copy Report Path", dialog)
     copy_report_path_button.setEnabled(False)
-    button_layout.addWidget(copy_report_path_button)
     select_feature_button = qt_widgets.QPushButton("Select Feature", dialog)
     select_feature_button.setEnabled(False)
     button_layout.addWidget(select_feature_button)
+    button_layout.addWidget(open_report_folder_button)
+    button_layout.addWidget(copy_report_path_button)
+    button_layout.addWidget(refresh_analysis_button)
     button_layout.addStretch()
     close_button = qt_widgets.QPushButton("Close", dialog)
+    close_button.setShortcut("Esc")
     close_button.clicked.connect(dialog.close)
     button_layout.addWidget(close_button)
     layout.addLayout(button_layout)
@@ -658,6 +768,7 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
             message,
         ),
         refresh_analysis_button=refresh_analysis_button,
+        status_label=status_label,
     )
     _connect_warning_table_actions(warning_table, controller)
     select_feature_button.clicked.connect(controller.select_selected_feature)
@@ -692,6 +803,16 @@ def _configure_warning_table(qt_widgets: Any, warning_table: Any) -> None:
     warning_table.setColumnCount(len(_WARNING_TABLE_HEADERS))
     warning_table.setHorizontalHeaderLabels(list(_WARNING_TABLE_HEADERS))
     warning_table.setSortingEnabled(False)
+    for column_index, width in enumerate(_WARNING_COLUMN_WIDTHS):
+        set_column_width = getattr(warning_table, "setColumnWidth", None)
+        if callable(set_column_width):
+            set_column_width(column_index, width)
+    horizontal_header = getattr(warning_table, "horizontalHeader", None)
+    if callable(horizontal_header):
+        header = horizontal_header()
+        set_stretch_last = getattr(header, "setStretchLastSection", None)
+        if callable(set_stretch_last):
+            set_stretch_last(True)
 
     item_view = getattr(qt_widgets, "QAbstractItemView", None)
     if item_view is None:
@@ -699,6 +820,32 @@ def _configure_warning_table(qt_widgets: Any, warning_table: Any) -> None:
     warning_table.setEditTriggers(item_view.NoEditTriggers)
     warning_table.setSelectionBehavior(item_view.SelectRows)
     warning_table.setSelectionMode(item_view.SingleSelection)
+
+
+def _summary_display_values(
+    presentation: AnalysisPresentation,
+) -> dict[str, str]:
+    """Format existing presentation facts consistently for summary labels."""
+
+    return {
+        "document": presentation.document_name,
+        "timestamp": presentation.analysis_timestamp or "Not available",
+        "score": f"{presentation.health_score}/100",
+        "document_objects": str(presentation.total_document_object_count),
+        "meaningful_features": str(
+            presentation.meaningful_modeling_feature_count
+        ),
+        "sketches": str(presentation.total_sketch_count),
+        "warnings": str(presentation.total_warning_count),
+        "high_warnings": str(presentation.high_warning_count),
+        "medium_warnings": str(presentation.medium_warning_count),
+        "low_warnings": str(presentation.low_warning_count),
+        "report": (
+            str(presentation.report_path)
+            if presentation.report_path is not None
+            else "Not available"
+        ),
+    }
 
 
 def _warning_table_values(warning: Any) -> tuple[str, str, str, str]:

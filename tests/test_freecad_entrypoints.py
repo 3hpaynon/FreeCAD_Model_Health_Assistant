@@ -141,7 +141,7 @@ def test_test_command_prints_when_clicked(monkeypatch) -> None:
     monkeypatch.setattr(
         ui,
         "show_results_dialog",
-        lambda presentation, *, gui_module=None, document_context=None: (
+        lambda presentation, *, gui_module=None, document_context=None, status_message="": (
             shown_presentations.append(presentation)
         ),
     )
@@ -192,8 +192,8 @@ def test_test_command_prints_active_document_name(monkeypatch, tmp_path) -> None
     monkeypatch.setattr(
         ui,
         "show_results_dialog",
-        lambda presentation, *, gui_module=None, document_context=None: shown_presentations.append(
-            (presentation, gui_module, document_context)
+        lambda presentation, *, gui_module=None, document_context=None, status_message="": shown_presentations.append(
+            (presentation, gui_module, document_context, status_message)
         ),
     )
 
@@ -226,7 +226,7 @@ def test_test_command_prints_active_document_name(monkeypatch, tmp_path) -> None
     ]
     assert output_path.exists()
     assert len(shown_presentations) == 1
-    presentation, passed_gui, document_context = shown_presentations[0]
+    presentation, passed_gui, document_context, status_message = shown_presentations[0]
     assert presentation.document_name == "Mechanical-EM Coupler Clutch Practice Model"
     assert presentation.health_score == 100
     assert presentation.meaningful_modeling_feature_count == 0
@@ -238,6 +238,7 @@ def test_test_command_prints_active_document_name(monkeypatch, tmp_path) -> None
     assert document_context.document_name == "Mechanical_EM_Coupler"
     assert document_context.app_module is fake_app
     assert document_context.gui_module is fake_gui
+    assert status_message == "Analysis completed. The active document is empty."
 
 
 def test_test_command_prints_extracted_feature_and_sketch_counts(monkeypatch, tmp_path) -> None:
@@ -266,7 +267,7 @@ def test_test_command_prints_extracted_feature_and_sketch_counts(monkeypatch, tm
     monkeypatch.setitem(sys.modules, "FreeCAD", fake_app)
     monkeypatch.setitem(sys.modules, "FreeCADGui", fake_gui)
 
-    from model_health_assistant import report_writer
+    from model_health_assistant import report_writer, ui
 
     output_path = tmp_path / "model_health_reports" / "extracted_model_report.json"
     monkeypatch.setattr(
@@ -506,7 +507,7 @@ def test_test_command_reports_report_writing_failure(monkeypatch, tmp_path) -> N
     monkeypatch.setitem(sys.modules, "FreeCAD", fake_app)
     monkeypatch.setitem(sys.modules, "FreeCADGui", fake_gui)
 
-    from model_health_assistant import report_writer
+    from model_health_assistant import report_writer, ui
 
     monkeypatch.setattr(
         report_writer,
@@ -518,6 +519,12 @@ def test_test_command_reports_report_writing_failure(monkeypatch, tmp_path) -> N
         raise OSError("could not write report")
 
     monkeypatch.setattr(report_writer, "save_report_json", fail_save)
+    shown_results = []
+    monkeypatch.setattr(
+        ui,
+        "show_results_dialog",
+        lambda presentation, **kwargs: shown_results.append((presentation, kwargs)),
+    )
 
     module = _load_module("mha_test_init_gui_report_failure", REPO_ROOT / "InitGui.py")
     workbench = module.ModelHealthAssistantWorkbench()
@@ -528,8 +535,34 @@ def test_test_command_reports_report_writing_failure(monkeypatch, tmp_path) -> N
     command.Activated()
 
     assert messages == [
-        "Model Health Assistant: Report writing failed: OSError: could not write report\n"
+        "Model Health Assistant: Report writing failed: OSError: could not write report\n",
+        "------------------------------------------------------------------------------------\n"
+        "Model Health Assistant Analysis\n\n"
+        "Document: Demo\n"
+        "Document objects: 0\n"
+        "Meaningful modeling features: 0\n"
+        "Sketches: 0\n\n"
+        "Warnings:\n"
+        "High: 0\n"
+        "Medium: 0\n"
+        "Low: 0\n"
+        "Total: 0\n\n"
+        "Health score: 100/100\n\n"
+        "Top issues:\n\n"
+        "None.\n\n"
+        "Report:\n"
+        "Not available\n"
+        "------------------------------------------------------------------------------------\n",
     ]
+    assert len(shown_results) == 1
+    presentation, kwargs = shown_results[0]
+    assert presentation.document_name == "Demo"
+    assert presentation.health_score == 100
+    assert presentation.report_path is None
+    assert kwargs["document_context"].document is fake_app.ActiveDocument
+    assert kwargs["status_message"] == (
+        "Analysis completed, but the JSON report could not be written."
+    )
 
 
 def test_test_command_prints_normally_without_freecad_console(monkeypatch, capsys) -> None:

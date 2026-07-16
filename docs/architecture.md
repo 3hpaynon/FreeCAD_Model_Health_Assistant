@@ -1,9 +1,8 @@
 # Model Health Assistant Architecture
 
 Model Health Assistant is designed as a local-first FreeCAD workbench. Version
-0.2 creates a loadable FreeCAD addon foundation with feature-tree extraction,
-deterministic risk analysis, local JSON reporting, and a registered workbench
-command.
+0.2 provides feature-tree extraction, deterministic risk analysis, local JSON
+reporting, and a small native FreeCAD results interface.
 
 ## Local System Flow
 
@@ -12,8 +11,10 @@ FreeCAD document
 -> local extractor
 -> feature/dependency graph
 -> local risk engine
--> JSON report
--> UI summary
+-> completed report object
+   -> local JSON report writer
+   -> UI-neutral presentation data
+      -> Report View and native results dialog
 ```
 
 ## Version 0.2 Components
@@ -21,12 +22,15 @@ FreeCAD document
 ### FreeCAD Entry Points
 
 FreeCAD loads the addon through root-level `Init.py` and `InitGui.py` files.
-These files add the local `src` directory to `sys.path` so the package can be
+`Init.py` exposes the local `src` directory on `sys.path` so the package can be
 used directly from FreeCAD's addon directory without an installation step.
 
-`InitGui.py` defines `ModelHealthAssistantWorkbench`, registers it with
-FreeCADGui when available, and adds the model-health command to a workbench menu
-and toolbar.
+`InitGui.py` remains deliberately minimal. It defines
+`ModelHealthAssistantWorkbench`, registers the stable internal command ID
+`MHA_TestCommand`, and adds it to the workbench menu and toolbar. The local
+command wrapper imports and delegates activation to
+`model_health_assistant.ui.run_analysis_command`; it contains no extraction,
+risk, report, or dialog-construction logic.
 
 ### Extractor
 
@@ -49,7 +53,17 @@ module can be imported and tested outside FreeCAD.
 - `ModelHealthReport`
 
 These classes are the shared contract between extraction, analysis, reporting,
-and future UI or AI layers.
+and presentation layers.
+
+### Presentation Layer
+
+`model_health_assistant.presentation` contains FreeCAD- and Qt-independent
+dataclasses `AnalysisPresentation` and `WarningDisplayItem`. It converts an
+already completed `ModelHealthReport` into stable display data without rerunning
+rules, recalculating the health score, parsing warning messages, or mutating the
+report. Warning ordering and counts come from structured report fields. Feature
+evidence and raw penalty values are copied only when exact structured matches
+exist.
 
 ### Risk Engine
 
@@ -133,20 +147,55 @@ For backward compatibility, `document_name`, `timestamp`, and
 name for the extracted document-object count; new consumers should use
 `total_document_object_count` because its meaning is unambiguous.
 
-### UI Command
+### UI Workflow and Results Dialog
 
-`model_health_assistant.ui` defines `AnalyzeFeatureTreeCommand`, a FreeCAD
-command. When run inside FreeCAD, the command:
+`model_health_assistant.ui.run_analysis_command` owns the synchronous
+application workflow:
 
-1. Read the active document.
-2. Extract feature information.
-3. Run local rules.
-4. Save a JSON report.
-5. Show a simple summary dialog.
+1. resolve the active FreeCAD document
+2. extract a defensive fact snapshot
+3. run the deterministic local risk engine once
+4. attempt to save the completed report as local JSON
+5. build UI-neutral presentation data from the completed report
+6. print Report View output and create or update the results dialog
 
-The UI module is safe to import outside FreeCAD and does not require FreeCAD GUI
-modules during tests. Command registration is owned by the workbench lifecycle,
-not by import side effects.
+The report object remains valid if JSON writing fails, so the UI still displays
+the completed analysis with report actions disabled and a concise partial-
+success status. Extraction and risk-engine failures preserve previously shown
+results and publish technical diagnostics to Report View.
+
+The non-modal `QDialog` is parented to FreeCAD's main window and retained by one
+module-level controller reference. Repeated command activation and manual
+refresh replace the dialog's values and rows rather than accumulating stale
+results or new windows. The controller stores the exact analyzed document
+identity. Feature selection revalidates that document and resolves the object by
+its structured internal name before using `FreeCADGui.Selection`; it does not
+modify model or view properties.
+
+Report-folder opening uses Qt's local-file URL support and passes only the
+report's parent directory. Clipboard support copies only the complete report
+path. Refresh is explicit and synchronous—there are no timers, observers,
+threads, retry loops, or background analysis.
+
+FreeCAD, FreeCADGui, and PySide imports are guarded. PySide is loaded only from
+FreeCAD's bundled PySide2 or legacy PySide namespaces at UI-creation time.
+Importing and testing the package outside FreeCAD therefore remains safe.
+
+### Responsibility Boundaries
+
+- `Init.py`: expose the local package layout to FreeCAD.
+- `InitGui.py`: register the workbench, stable command ID, menu, and toolbar;
+  delegate activation.
+- `extractor.py`: read FreeCAD objects and produce model facts without mutation.
+- `models.py`: define pure structured facts, warnings, and completed reports.
+- `risk_engine.py`: own all warning rules, severity, deduplication, and scoring.
+- `report_writer.py`: own local path construction and JSON serialization.
+- `presentation.py`: reshape completed structured results for display only.
+- `ui.py`: orchestrate one analysis run, print status, manage the native dialog,
+  and handle user actions.
+
+Automated tests exercise pure logic and headless fakes; they require neither a
+FreeCAD installation nor a pip-installed PySide package.
 
 ## Privacy Design
 
@@ -159,5 +208,6 @@ The privacy posture is explicit:
 - No server backend is used.
 - No CAD files or reports are uploaded.
 
-Version 0.2 implements only the local foundation and contains no API-key,
-server, cloud, upload, AI, or machine-learning code.
+Version 0.2 contains no API-key, server, cloud, upload, AI, machine-learning,
+telemetry, or automatic model-repair code. Analysis and JSON reports remain on
+the local machine.

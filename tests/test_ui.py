@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -83,8 +84,14 @@ def test_show_results_dialog_reuses_and_updates_one_controller(monkeypatch) -> N
             self.presentations = []
             self.show_count = 0
 
-        def update_presentation(self, presentation, *, document_context=None) -> None:
-            self.presentations.append(presentation)
+        def update_presentation(
+            self,
+            presentation,
+            *,
+            document_context=None,
+            status_message="",
+        ) -> None:
+            self.presentations.append((presentation, status_message))
 
         def show(self) -> None:
             self.show_count += 1
@@ -101,11 +108,15 @@ def test_show_results_dialog_reuses_and_updates_one_controller(monkeypatch) -> N
     first = _presentation(document_name="First", score=95)
     second = _presentation(document_name="Second", score=80)
 
-    assert ui.show_results_dialog(first, gui_module=gui_module) is True
+    assert ui.show_results_dialog(
+        first,
+        gui_module=gui_module,
+        status_message="First status",
+    ) is True
     assert ui.show_results_dialog(second, gui_module=gui_module) is True
 
     assert created == [(qt_widgets, parent)]
-    assert controller.presentations == [first, second]
+    assert controller.presentations == [(first, "First status"), (second, "")]
     assert controller.show_count == 2
     assert ui._results_dialog is controller
 
@@ -165,6 +176,34 @@ def test_results_dialog_controller_formats_summary_and_reopens() -> None:
     assert dialog.activate_count == 2
 
 
+def test_summary_display_values_include_complete_existing_presentation_data() -> None:
+    presentation = replace(
+        _presentation(document_name="Demo", score=88, report_path=None),
+        analysis_timestamp=None,
+        total_document_object_count=12,
+        meaningful_modeling_feature_count=7,
+        total_sketch_count=3,
+        total_warning_count=6,
+        high_warning_count=2,
+        medium_warning_count=3,
+        low_warning_count=1,
+    )
+
+    assert ui._summary_display_values(presentation) == {
+        "document": "Demo",
+        "timestamp": "Not available",
+        "score": "88/100",
+        "document_objects": "12",
+        "meaningful_features": "7",
+        "sketches": "3",
+        "warnings": "6",
+        "high_warnings": "2",
+        "medium_warnings": "3",
+        "low_warnings": "1",
+        "report": "Not available",
+    }
+
+
 def test_results_dialog_controller_marks_missing_report_path() -> None:
     values = {}
     labels = {
@@ -183,6 +222,99 @@ def test_results_dialog_controller_marks_missing_report_path() -> None:
     controller.update_presentation(_presentation(report_path=None))
 
     assert values["report"] == "Not available"
+
+
+def test_results_dialog_status_replaces_and_clears_concise_messages() -> None:
+    class FakeStatusLabel:
+        def __init__(self) -> None:
+            self.text = None
+            self.visible = None
+
+        def setText(self, text: str) -> None:  # noqa: N802 - mirrors Qt.
+            self.text = text
+
+        def setVisible(self, visible: bool) -> None:  # noqa: N802 - mirrors Qt.
+            self.visible = visible
+
+    labels = {
+        key: SimpleNamespace(setText=lambda _text: None)
+        for key in (
+            "document",
+            "score",
+            "meaningful_features",
+            "sketches",
+            "warnings",
+            "report",
+        )
+    }
+    status_label = FakeStatusLabel()
+    controller = ui._ResultsDialogController(
+        SimpleNamespace(),
+        labels,
+        status_label=status_label,
+    )
+
+    controller.update_presentation(
+        _presentation(report_path=None),
+        status_message="Analysis completed, but the JSON report could not be written.",
+    )
+    assert status_label.text == (
+        "Analysis completed, but the JSON report could not be written."
+    )
+    assert status_label.visible is True
+
+    controller.update_presentation(_presentation(report_path=None))
+    assert status_label.text == ""
+    assert status_label.visible is False
+
+
+def test_presentation_status_messages_cover_empty_and_partial_success() -> None:
+    normal = _presentation(total_warning_count=2)
+    empty_document = replace(
+        normal,
+        total_document_object_count=0,
+        meaningful_modeling_feature_count=0,
+        total_warning_count=0,
+    )
+    no_meaningful_features = replace(
+        normal,
+        total_document_object_count=3,
+        meaningful_modeling_feature_count=0,
+        total_warning_count=0,
+    )
+    no_warnings = replace(normal, total_warning_count=0)
+
+    assert ui._presentation_status_message(normal) == ""
+    assert ui._presentation_status_message(empty_document) == (
+        "Analysis completed. The active document is empty."
+    )
+    assert ui._presentation_status_message(no_meaningful_features) == (
+        "Analysis completed. No meaningful modeling features were found."
+    )
+    assert ui._presentation_status_message(no_warnings) == (
+        "Analysis completed with no generated warnings. "
+        "This does not guarantee that the model is error-free."
+    )
+    assert ui._presentation_status_message(
+        empty_document,
+        report_failure_message="Report writing failed.",
+    ) == "Report writing failed."
+
+
+def test_results_error_updates_existing_dialog_without_replacing_results(
+    monkeypatch,
+) -> None:
+    statuses = []
+    shown = []
+    controller = SimpleNamespace(
+        update_status=statuses.append,
+        show=lambda: shown.append(True),
+    )
+    monkeypatch.setattr(ui, "_results_dialog", controller)
+
+    assert ui._show_results_error("Analysis failed.", SimpleNamespace()) is True
+    assert statuses == ["Analysis failed."]
+    assert shown == [True]
 
 
 def test_report_path_actions_revalidate_and_report_feedback(tmp_path) -> None:
@@ -394,6 +526,16 @@ def test_warning_table_is_read_only_and_selects_single_rows() -> None:
         def setSortingEnabled(self, enabled: bool) -> None:  # noqa: N802
             calls["sorting"] = enabled
 
+        def setColumnWidth(self, column: int, width: int) -> None:  # noqa: N802
+            calls.setdefault("column_widths", []).append((column, width))
+
+        def horizontalHeader(self):  # noqa: N802 - mirrors Qt.
+            return SimpleNamespace(
+                setStretchLastSection=lambda enabled: calls.update(
+                    {"stretch_last": enabled}
+                )
+            )
+
         def setEditTriggers(self, triggers) -> None:  # noqa: N802
             calls["edit_triggers"] = triggers
 
@@ -418,6 +560,8 @@ def test_warning_table_is_read_only_and_selects_single_rows() -> None:
         "column_count": 4,
         "headers": ["Severity", "Feature", "Rule", "Warning"],
         "sorting": False,
+        "column_widths": [(0, 85), (1, 170), (2, 190)],
+        "stretch_last": True,
         "edit_triggers": "no-edit",
         "selection_behavior": "rows",
         "selection_mode": "single",
