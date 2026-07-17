@@ -84,15 +84,56 @@ def test_init_gui_initialize_adds_test_command_to_toolbar_and_menu(monkeypatch) 
 
     workbench.Initialize()
 
-    assert list(fake_gui.commands) == ["MHA_TestCommand"]
+    assert list(fake_gui.commands) == ["MHA_TestCommand", "MHA_ProviderSettings"]
     resources = fake_gui.commands["MHA_TestCommand"].GetResources()
     assert resources["MenuText"] == "Analyze Model Health"
     assert resources["ToolTip"] == (
         "Analyze the active FreeCAD document and display model health results"
     )
     assert resources["Pixmap"] == ""
+    settings_resources = fake_gui.commands["MHA_ProviderSettings"].GetResources()
+    assert settings_resources == {
+        "MenuText": "AI Provider Settings",
+        "ToolTip": "Configure local mock or bring-your-own-key OpenAI settings",
+        "Pixmap": "",
+    }
     assert toolbars == [("Model Health Assistant", ["MHA_TestCommand"])]
-    assert menus == [("Model Health Assistant", ["MHA_TestCommand"])]
+    assert menus == [
+        (
+            "Model Health Assistant",
+            ["MHA_TestCommand", "MHA_ProviderSettings"],
+        )
+    ]
+
+
+def test_provider_settings_command_opens_only_settings_ui(monkeypatch) -> None:
+    calls = []
+    fake_app = types.ModuleType("FreeCAD")
+    fake_gui = types.ModuleType("FreeCADGui")
+    fake_gui.commands = {}
+    fake_gui.addCommand = lambda name, command: fake_gui.commands.update({name: command})
+    fake_gui.addWorkbench = lambda workbench: None
+
+    monkeypatch.setitem(sys.modules, "FreeCAD", fake_app)
+    monkeypatch.setitem(sys.modules, "FreeCADGui", fake_gui)
+
+    from model_health_assistant import provider_settings_ui
+
+    monkeypatch.setattr(
+        provider_settings_ui,
+        "show_provider_settings_dialog",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+    module = _load_module(
+        "mha_test_init_gui_provider_settings",
+        REPO_ROOT / "InitGui.py",
+    )
+    workbench = module.ModelHealthAssistantWorkbench()
+    workbench.Initialize()
+
+    fake_gui.commands["MHA_ProviderSettings"].Activated()
+
+    assert calls == [{"app_module": fake_app, "gui_module": fake_gui}]
 
 
 def test_init_gui_initialize_prints_when_freecad_console_is_available(monkeypatch) -> None:
@@ -611,4 +652,4 @@ def test_test_command_is_local_to_initialize() -> None:
     assert "TestModelHealthAssistantCommand" not in text
     assert "TestModelHealthAssistantCommand" not in top_level_classes
     assert "ModelHealthAssistantWorkbench" in top_level_classes
-    assert local_classes == ["_TestCommand"]
+    assert local_classes == ["_TestCommand", "_ProviderSettingsCommand"]

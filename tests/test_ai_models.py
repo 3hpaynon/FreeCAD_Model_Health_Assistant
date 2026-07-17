@@ -9,6 +9,7 @@ from model_health_assistant.ai_models import (
     AIExplanationRequest,
     AIExplanationResponse,
     AIRequestContext,
+    AIUsageMetadata,
     AIWarningContext,
     AIWarningExplanation,
 )
@@ -113,6 +114,8 @@ def test_response_defaults_support_missing_optional_fields() -> None:
     assert explanation.confidence is None
     assert explanation.manual_review_steps == []
     assert response.request_identifier is None
+    assert response.actual_model_identifier is None
+    assert response.usage is None
     assert data["request_identifier"] is None
     assert json.loads(json.dumps(data)) == data
 
@@ -146,6 +149,7 @@ def test_ai_models_have_no_path_key_or_raw_object_fields() -> None:
         AIRequestContext,
         AIExplanationRequest,
         AIWarningExplanation,
+        AIUsageMetadata,
         AIExplanationResponse,
     )
     field_names = {item.name for model_type in model_types for item in fields(model_type)}

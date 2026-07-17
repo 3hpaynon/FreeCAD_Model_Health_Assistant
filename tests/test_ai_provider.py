@@ -9,13 +9,20 @@ from model_health_assistant.ai_models import AIExplanationRequest, AIExplanation
 from model_health_assistant.ai_prompts import build_ai_explanation_request
 from model_health_assistant.ai_provider import (
     AIAuthenticationError,
+    AIConnectionError,
     AIExplanationProvider,
     AIInvalidResponseError,
+    AIInvalidRequestError,
+    AIMissingCredentialError,
+    AIPermissionError,
     AIProviderError,
+    AIProviderRefusalError,
+    AIProviderServerError,
     AIProviderUnavailableError,
     AIRateLimitError,
     AIRequestRejectedError,
     AIRequestTimeoutError,
+    AIUnsupportedSDKError,
 )
 from model_health_assistant.models import ModelHealthReport
 
@@ -92,6 +99,13 @@ def test_provider_errors_share_one_neutral_base_type() -> None:
         AIInvalidResponseError,
         AIRequestTimeoutError,
         AIAuthenticationError,
+        AIMissingCredentialError,
+        AIPermissionError,
+        AIConnectionError,
+        AIInvalidRequestError,
+        AIProviderServerError,
+        AIProviderRefusalError,
+        AIUnsupportedSDKError,
         AIRateLimitError,
     )
 

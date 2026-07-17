@@ -159,6 +159,21 @@ class AIWarningExplanation:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class AIUsageMetadata:
+    """Provider-neutral token usage returned by an explanation request."""
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    reasoning_tokens: int | None = None
+
+    def to_dict(self) -> dict[str, JSONValue]:
+        """Return JSON-compatible non-secret usage counters."""
+
+        return asdict(self)
+
+
 @dataclass(slots=True, kw_only=True)
 class AIExplanationResponse:
     """Validated-shape response contract shared by all future providers.
@@ -174,6 +189,8 @@ class AIExplanationResponse:
     warning_explanations: list[AIWarningExplanation] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
     request_identifier: str | None = None
+    actual_model_identifier: str | None = None
+    usage: AIUsageMetadata | None = None
     schema_version: str = AI_RESPONSE_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, JSONValue]:
@@ -193,6 +210,7 @@ __all__ = [
     "AIRequestMetadata",
     "AIWarningContext",
     "AIWarningExplanation",
+    "AIUsageMetadata",
     "JSONScalar",
     "JSONValue",
 ]

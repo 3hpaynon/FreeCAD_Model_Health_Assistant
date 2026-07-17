@@ -37,7 +37,7 @@ class ModelHealthAssistantWorkbench(BaseWorkbench):
     Icon = ""
 
     def Initialize(self):  # noqa: N802
-        """Register the simple test command."""
+        """Register the local analysis and provider-settings commands."""
 
         class _TestCommand:
             def GetResources(self):  # noqa: N802
@@ -93,11 +93,58 @@ class ModelHealthAssistantWorkbench(BaseWorkbench):
             def IsActive(self):  # noqa: N802
                 return True
 
+        class _ProviderSettingsCommand:
+            def GetResources(self):  # noqa: N802
+                return {
+                    "MenuText": "AI Provider Settings",
+                    "ToolTip": (
+                        "Configure local mock or bring-your-own-key OpenAI settings"
+                    ),
+                    "Pixmap": "",
+                }
+
+            def Activated(self):  # noqa: N802
+                try:
+                    from model_health_assistant.provider_settings_ui import (
+                        show_provider_settings_dialog,
+                    )
+
+                    shown = show_provider_settings_dialog(
+                        app_module=App,
+                        gui_module=Gui,
+                    )
+                    if shown:
+                        return
+                    message = (
+                        "Model Health Assistant: Provider settings UI is unavailable.\n"
+                    )
+                except Exception as exc:
+                    message = (
+                        "Model Health Assistant: Provider settings failed safely: "
+                        + type(exc).__name__
+                        + "\n"
+                    )
+
+                try:
+                    if App is not None and hasattr(App, "Console"):
+                        App.Console.PrintMessage(message)
+                        return
+                except Exception:
+                    pass
+                print(message, end="")
+
+            def IsActive(self):  # noqa: N802
+                return True
+
         if Gui is not None and hasattr(Gui, "addCommand"):
             Gui.addCommand("MHA_TestCommand", _TestCommand())
+            Gui.addCommand("MHA_ProviderSettings", _ProviderSettingsCommand())
 
         self.appendToolbar("Model Health Assistant", ["MHA_TestCommand"])
-        self.appendMenu("Model Health Assistant", ["MHA_TestCommand"])
+        self.appendMenu(
+            "Model Health Assistant",
+            ["MHA_TestCommand", "MHA_ProviderSettings"],
+        )
 
         try:
             if App is not None and hasattr(App, "Console"):

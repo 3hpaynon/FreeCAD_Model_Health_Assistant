@@ -14,6 +14,7 @@ from model_health_assistant.ai_models import (
     AIExplanationRequest,
     AIExplanationResponse,
     AIRequestContext,
+    AIUsageMetadata,
     AIWarningExplanation,
 )
 from model_health_assistant.ai_prompts import build_ai_explanation_request
@@ -142,6 +143,15 @@ def validate_ai_explanation_response(
         )
     if not isinstance(response.warning_explanations, list):
         raise AIInvalidResponseError("Warning explanations must be a list.")
+    if response.request_identifier is not None and not _nonempty_text(
+        response.request_identifier
+    ):
+        raise AIInvalidResponseError("Provider response has an invalid request identifier.")
+    if response.actual_model_identifier is not None and not _nonempty_text(
+        response.actual_model_identifier
+    ):
+        raise AIInvalidResponseError("Provider response has an invalid model identifier.")
+    _validate_usage_metadata(response.usage)
 
     source_warnings = {
         (
@@ -158,6 +168,21 @@ def validate_ai_explanation_response(
             source_warnings,
             seen_explanations,
         )
+
+
+def _validate_usage_metadata(usage: AIUsageMetadata | None) -> None:
+    if usage is None:
+        return
+    if not isinstance(usage, AIUsageMetadata):
+        raise AIInvalidResponseError("Provider response has invalid usage metadata.")
+    for value in (
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.total_tokens,
+        usage.reasoning_tokens,
+    ):
+        if value is not None and (type(value) is not int or value < 0):
+            raise AIInvalidResponseError("Provider response has invalid usage metadata.")
 
 
 def _validate_warning_explanation(

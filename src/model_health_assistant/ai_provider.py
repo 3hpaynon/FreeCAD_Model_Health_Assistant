@@ -49,6 +49,38 @@ class AIRateLimitError(AIProviderError):
     """Reserved for future provider rate-limit responses."""
 
 
+class AIMissingCredentialError(AIProviderError):
+    """Raised when provider execution has no configured secure credential."""
+
+
+class AIPermissionError(AIProviderError):
+    """Raised when the provider denies access to a requested resource."""
+
+
+class AIConnectionError(AIProviderError):
+    """Raised when the provider service cannot be reached."""
+
+
+class AIInvalidRequestError(AIProviderError):
+    """Raised when the provider rejects request parameters or a model ID."""
+
+
+class AIProviderServerError(AIProviderError):
+    """Raised when the remote provider reports a server-side failure."""
+
+
+class AIProviderRefusalError(AIRequestRejectedError):
+    """Raised when the model returns a structured refusal instead of output."""
+
+    def __init__(self, message: str, *, request_identifier: str | None = None) -> None:
+        super().__init__(message)
+        self.request_identifier = request_identifier
+
+
+class AIUnsupportedSDKError(AIProviderUnavailableError):
+    """Raised when the installed provider SDK lacks the required API surface."""
+
+
 @runtime_checkable
 class AIExplanationProvider(Protocol):
     """Structural contract implemented by explanation providers.
@@ -90,11 +122,18 @@ class AIExplanationProvider(Protocol):
 
 __all__ = [
     "AIAuthenticationError",
+    "AIConnectionError",
     "AIExplanationProvider",
     "AIInvalidResponseError",
+    "AIInvalidRequestError",
+    "AIMissingCredentialError",
+    "AIPermissionError",
     "AIProviderError",
+    "AIProviderRefusalError",
+    "AIProviderServerError",
     "AIProviderUnavailableError",
     "AIRateLimitError",
     "AIRequestRejectedError",
     "AIRequestTimeoutError",
+    "AIUnsupportedSDKError",
 ]
