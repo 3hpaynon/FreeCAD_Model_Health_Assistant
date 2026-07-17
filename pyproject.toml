@@ -17,6 +17,10 @@ dependencies = []
 dev = [
   "pytest>=8"
 ]
+real-ai = [
+  "openai==2.45.0",
+  "keyring==25.7.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
