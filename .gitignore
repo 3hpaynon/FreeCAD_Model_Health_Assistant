@@ -36,3 +36,5 @@ output/
 Thumbs.db
 .idea/
 .vscode/
+.pytest_temp/
+.pytest_step*/
