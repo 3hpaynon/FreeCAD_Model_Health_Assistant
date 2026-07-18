@@ -76,11 +76,6 @@ class AIExplanationService:
     ) -> AIExplanationResponse:
         """Execute one provider-neutral explanation workflow for ``report``."""
 
-        if not self._provider.is_available():
-            raise AIProviderUnavailableError(
-                f"Provider '{self._provider.provider_identifier}' is unavailable."
-            )
-
         try:
             context = self._context_builder(
                 report,
@@ -98,6 +93,21 @@ class AIExplanationService:
             raise AIRequestBuildError(
                 f"Could not build AI explanation request: {type(exc).__name__}: {exc}"
             ) from exc
+
+        return self.explain_request(request)
+
+    def explain_request(
+        self,
+        request: AIExplanationRequest,
+    ) -> AIExplanationResponse:
+        """Execute and validate one already-built, privacy-reviewed request."""
+
+        if not isinstance(request, AIExplanationRequest):
+            raise TypeError("request must be an AIExplanationRequest")
+        if not self._provider.is_available():
+            raise AIProviderUnavailableError(
+                f"Provider '{self._provider.provider_identifier}' is unavailable."
+            )
 
         response = self._provider.explain(request)
         validate_ai_explanation_response(

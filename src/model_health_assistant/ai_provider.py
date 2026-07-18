@@ -65,6 +65,10 @@ class AIInvalidRequestError(AIProviderError):
     """Raised when the provider rejects request parameters or a model ID."""
 
 
+class AIUnsupportedModelError(AIInvalidRequestError):
+    """Raised when the selected provider model is unavailable or unsupported."""
+
+
 class AIProviderServerError(AIProviderError):
     """Raised when the remote provider reports a server-side failure."""
 
@@ -136,4 +140,5 @@ __all__ = [
     "AIRequestRejectedError",
     "AIRequestTimeoutError",
     "AIUnsupportedSDKError",
+    "AIUnsupportedModelError",
 ]

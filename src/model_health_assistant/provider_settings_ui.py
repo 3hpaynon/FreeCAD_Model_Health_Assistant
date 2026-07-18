@@ -9,6 +9,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from model_health_assistant.ai_connection import (
+    AIConnectionTestResult,
+    AIConnectionTester,
+)
+from model_health_assistant.ai_provider import (
+    AIAuthenticationError,
+    AIConnectionError,
+    AIInvalidRequestError,
+    AIInvalidResponseError,
+    AIMissingCredentialError,
+    AIPermissionError,
+    AIProviderRefusalError,
+    AIProviderServerError,
+    AIProviderUnavailableError,
+    AIRateLimitError,
+    AIRequestTimeoutError,
+    AIUnsupportedModelError,
+    AIUnsupportedSDKError,
+)
+
 from model_health_assistant.credentials import (
     CredentialAlreadyConfiguredError,
     CredentialBackendUnavailableError,
@@ -26,6 +46,8 @@ from model_health_assistant.openai_provider import (
     DEFAULT_OPENAI_REASONING_EFFORT,
     DEFAULT_OPENAI_RESPONSE_VERBOSITY,
     SUPPORTED_OPENAI_MODEL_IDENTIFIERS,
+    OpenAIExplanationProvider,
+    OpenAIProviderConfiguration,
 )
 from model_health_assistant.provider_settings import (
     LOCAL_MOCK_PROVIDER_IDENTIFIER,
@@ -39,6 +61,7 @@ from model_health_assistant.provider_settings import (
     ProviderSettingsError,
     ProviderSettingsStore,
 )
+from model_health_assistant.qt_async import start_qt_background_operation
 
 try:  # pragma: no cover - exercised only inside FreeCAD.
     import FreeCAD as App  # type: ignore
@@ -68,6 +91,15 @@ CREDENTIAL_STORAGE_NOTICE = (
 )
 
 ConfirmRemoval = Callable[[], bool]
+ConfirmConnectionTest = Callable[[str], bool]
+ConnectionProviderFactory = Callable[
+    [OpenAIProviderConfiguration],
+    AIConnectionTester,
+]
+WorkerLauncher = Callable[
+    [Callable[[], object], Callable[[object], None], Callable[[BaseException], None]],
+    object,
+]
 
 
 @dataclass(slots=True)
@@ -98,14 +130,21 @@ class _ProviderSettingsDialogController:
         settings_store: ProviderSettingsStore,
         credential_store: ProviderCredentialStore,
         confirm_removal: ConfirmRemoval,
+        confirm_connection_test: ConfirmConnectionTest | None = None,
+        connection_provider_factory: ConnectionProviderFactory | None = None,
+        worker_launcher: WorkerLauncher | None = None,
     ) -> None:
         self.widgets = widgets
         self._settings_store = settings_store
         self._credential_store = credential_store
         self._confirm_removal = confirm_removal
+        self._confirm_connection_test = confirm_connection_test
+        self._connection_provider_factory = connection_provider_factory
+        self._worker_launcher = worker_launcher
         self._loaded_settings = ProviderSettings()
         self._credential_configured = False
         self._credential_backend_available = False
+        self._connection_operation: object | None = None
 
     def refresh(self) -> None:
         """Reload non-secret state while keeping the API key field empty."""
@@ -142,6 +181,100 @@ class _ProviderSettingsDialogController:
         self.widgets.api_key_input.clear()
 
     def provider_changed(self) -> None:
+        self._update_openai_control_state()
+
+    def test_connection(self) -> None:
+        """Confirm and start one minimal real request off the GUI thread."""
+
+        if not self._require_openai_selection():
+            return
+        if self._connection_is_running():
+            self._set_operation_status("A provider connection test is already running.")
+            return
+        self.refresh_credential_status()
+        if not self._credential_backend_available:
+            self._set_operation_status("Secure credential storage unavailable.")
+            return
+        if not self._credential_configured:
+            self._set_operation_status("No secure OpenAI key is configured.")
+            return
+        if (
+            self._connection_provider_factory is None
+            or self._worker_launcher is None
+            or self._confirm_connection_test is None
+        ):
+            self._set_operation_status(
+                "Connection testing is unavailable in this Qt runtime."
+            )
+            return
+
+        try:
+            configuration = self._openai_configuration()
+            provider = self._connection_provider_factory(configuration)
+        except (TypeError, ValueError):
+            self._set_operation_status("The OpenAI settings are invalid.")
+            return
+        try:
+            sdk_available = provider.is_available()
+        except Exception:
+            sdk_available = False
+        if not sdk_available:
+            self._set_operation_status("OpenAI SDK dependency is unavailable.")
+            return
+
+        confirmation_text = (
+            "Send one minimal real request to OpenAI using model "
+            f"{configuration.model_identifier}? The request may incur a small "
+            "provider charge. No CAD data, model-health report, document name, "
+            "feature label, file, or geometry will be sent."
+        )
+        if not self._confirm_connection_test(confirmation_text):
+            self._set_operation_status("Connection test cancelled. No request was sent.")
+            return
+
+        self._set_operation_status("Testing the OpenAI connection...")
+        self._update_openai_control_state(force_busy=True)
+        try:
+            self._connection_operation = self._worker_launcher(
+                provider.test_connection,
+                self._connection_test_succeeded,
+                self._connection_test_failed,
+            )
+        except Exception:
+            self._connection_operation = None
+            self._set_operation_status("The connection-test worker could not start.")
+            self._update_openai_control_state()
+
+    def _connection_test_succeeded(self, result: object) -> None:
+        self._connection_operation = None
+        if not isinstance(result, AIConnectionTestResult):
+            self._set_operation_status("Invalid structured connection-test response.")
+            self._update_openai_control_state()
+            return
+        details = [
+            "Connection successful.",
+            f"Provider: {result.provider_display_name}.",
+        ]
+        if result.actual_model_identifier:
+            details.append(f"Model: {result.actual_model_identifier}.")
+        if result.request_identifier:
+            details.append(f"Request ID: {result.request_identifier}.")
+        if result.usage is not None:
+            usage_parts = []
+            if result.usage.input_tokens is not None:
+                usage_parts.append(f"input {result.usage.input_tokens}")
+            if result.usage.output_tokens is not None:
+                usage_parts.append(f"output {result.usage.output_tokens}")
+            if result.usage.total_tokens is not None:
+                usage_parts.append(f"total {result.usage.total_tokens}")
+            if usage_parts:
+                details.append("Token usage: " + ", ".join(usage_parts) + ".")
+        self._set_operation_status(" ".join(details))
+        self._update_openai_control_state()
+
+    def _connection_test_failed(self, error: BaseException) -> None:
+        self._connection_operation = None
+        self._set_operation_status(_connection_error_text(error))
         self._update_openai_control_state()
 
     def save_settings(self) -> None:
@@ -334,7 +467,28 @@ class _ProviderSettingsDialogController:
         )
         return False
 
-    def _update_openai_control_state(self) -> None:
+    def _openai_configuration(self) -> OpenAIProviderConfiguration:
+        return OpenAIProviderConfiguration(
+            model_identifier=str(self.widgets.model_combo.currentText()).strip(),
+            request_timeout_seconds=int(self.widgets.timeout_input.value()),
+            maximum_retries=int(self.widgets.retry_input.value()),
+            maximum_output_tokens=int(self.widgets.maximum_output_input.value()),
+            reasoning_effort=(
+                self._loaded_settings.reasoning_effort
+                or DEFAULT_OPENAI_REASONING_EFFORT
+            ),
+            response_verbosity=(
+                self._loaded_settings.response_verbosity
+                or DEFAULT_OPENAI_RESPONSE_VERBOSITY
+            ),
+        )
+
+    def _connection_is_running(self) -> bool:
+        if self._connection_operation is None:
+            return False
+        return bool(getattr(self._connection_operation, "is_running", True))
+
+    def _update_openai_control_state(self, *, force_busy: bool = False) -> None:
         openai_selected = (
             self._selected_provider_identifier() == OPENAI_PROVIDER_IDENTIFIER
         )
@@ -361,8 +515,16 @@ class _ProviderSettingsDialogController:
             and self._credential_backend_available
             and self._credential_configured
         )
-        # Step 9 owns the explicit request and confirmation workflow.
-        self.widgets.test_connection_button.setEnabled(False)
+        connection_busy = force_busy or self._connection_is_running()
+        self.widgets.test_connection_button.setEnabled(
+            openai_selected
+            and self._credential_backend_available
+            and self._credential_configured
+            and not connection_busy
+            and self._connection_provider_factory is not None
+            and self._worker_launcher is not None
+            and self._confirm_connection_test is not None
+        )
 
     def _set_operation_status(self, text: str) -> None:
         self.widgets.operation_status_label.setText(text)
@@ -378,6 +540,7 @@ def show_provider_settings_dialog(
     settings_store: ProviderSettingsStore | None = None,
     credential_store: ProviderCredentialStore | None = None,
     qt_widgets: Any | None = None,
+    qt_core: Any | None = None,
 ) -> bool:
     """Show one non-modal settings dialog without executing a provider request."""
 
@@ -389,6 +552,7 @@ def show_provider_settings_dialog(
     active_qt_widgets = qt_widgets or _load_qt_widgets()
     if active_qt_widgets is None:
         return False
+    active_qt_core = qt_core or _load_qt_core()
 
     try:
         effective_settings_store = settings_store or ProviderSettingsStore(
@@ -402,11 +566,34 @@ def show_provider_settings_dialog(
 
     global _provider_settings_dialog
     if _provider_settings_dialog is None:
+        def connection_provider_factory(
+            configuration: OpenAIProviderConfiguration,
+        ) -> OpenAIExplanationProvider:
+            return OpenAIExplanationProvider(
+                lambda: effective_credential_store.retrieve_for_provider_execution(
+                    OPENAI_PROVIDER_IDENTIFIER
+                ),
+                configuration=configuration,
+            )
+
+        worker_launcher = None
+        if active_qt_core is not None:
+            worker_launcher = lambda operation, succeeded, failed: (
+                start_qt_background_operation(
+                    active_qt_core,
+                    parent,
+                    operation,
+                    succeeded,
+                    failed,
+                )
+            )
         _provider_settings_dialog = _create_provider_settings_dialog(
             active_qt_widgets,
             parent,
             effective_settings_store,
             effective_credential_store,
+            connection_provider_factory=connection_provider_factory,
+            worker_launcher=worker_launcher,
         )
     _provider_settings_dialog.refresh()
     _provider_settings_dialog.show()
@@ -418,6 +605,9 @@ def _create_provider_settings_dialog(
     parent: Any,
     settings_store: ProviderSettingsStore,
     credential_store: ProviderCredentialStore,
+    *,
+    connection_provider_factory: ConnectionProviderFactory | None = None,
+    worker_launcher: WorkerLauncher | None = None,
 ) -> _ProviderSettingsDialogController:
     dialog = qt_widgets.QDialog(parent)
     dialog.setWindowTitle(PROVIDER_SETTINGS_WINDOW_TITLE)
@@ -489,7 +679,7 @@ def _create_provider_settings_dialog(
     bottom_button_layout = qt_widgets.QHBoxLayout()
     test_connection_button = qt_widgets.QPushButton("Test Connection", dialog)
     test_connection_button.setToolTip(
-        "Connection testing and its explicit confirmation are added in Step 9."
+        "Explicitly send a small provider request containing no CAD data."
     )
     save_settings_button = qt_widgets.QPushButton("Save Settings", dialog)
     close_button = qt_widgets.QPushButton("Close", dialog)
@@ -528,11 +718,25 @@ def _create_provider_settings_dialog(
         )
         return answer == message_box.Yes
 
+    def confirm_connection_test(message: str) -> bool:
+        message_box = qt_widgets.QMessageBox
+        answer = message_box.question(
+            dialog,
+            "Test OpenAI connection",
+            message,
+            message_box.Yes | message_box.No,
+            message_box.No,
+        )
+        return answer == message_box.Yes
+
     controller = _ProviderSettingsDialogController(
         widgets,
         settings_store,
         credential_store,
         confirm_removal,
+        confirm_connection_test,
+        connection_provider_factory,
+        worker_launcher,
     )
     provider_combo.currentIndexChanged.connect(
         lambda *_args: controller.provider_changed()
@@ -540,6 +744,9 @@ def _create_provider_settings_dialog(
     save_key_button.clicked.connect(lambda *_args: controller.save_key())
     replace_key_button.clicked.connect(lambda *_args: controller.replace_key())
     remove_key_button.clicked.connect(lambda *_args: controller.remove_key())
+    test_connection_button.clicked.connect(
+        lambda *_args: controller.test_connection()
+    )
     save_settings_button.clicked.connect(lambda *_args: controller.save_settings())
     close_button.clicked.connect(lambda *_args: controller.close())
     finished_signal = getattr(dialog, "finished", None)
@@ -561,6 +768,32 @@ def _credential_status_text(status: ProviderCredentialStatus) -> str:
     if not status.backend_available:
         return "Secure credential storage unavailable."
     return "Credential backend error."
+
+
+def _connection_error_text(error: BaseException) -> str:
+    if isinstance(error, AIMissingCredentialError):
+        return "Connection failed: no secure OpenAI key is configured."
+    if isinstance(error, AIAuthenticationError):
+        return "Connection failed: the OpenAI key is invalid."
+    if isinstance(error, AIPermissionError):
+        return "Connection failed: OpenAI permission was denied."
+    if isinstance(error, AIUnsupportedModelError):
+        return "Connection failed: the selected OpenAI model is unsupported."
+    if isinstance(error, AIRateLimitError):
+        return "Connection failed: OpenAI rate limit reached."
+    if isinstance(error, AIRequestTimeoutError):
+        return "Connection failed: the OpenAI request timed out."
+    if isinstance(error, AIConnectionError):
+        return "Connection failed: OpenAI is offline or unreachable."
+    if isinstance(error, AIProviderServerError):
+        return "Connection failed: OpenAI reported a server failure."
+    if isinstance(error, (AIInvalidResponseError, AIProviderRefusalError)):
+        return "Connection failed: invalid structured response."
+    if isinstance(error, (AIProviderUnavailableError, AIUnsupportedSDKError)):
+        return "Connection failed: OpenAI SDK dependency is unavailable."
+    if isinstance(error, AIInvalidRequestError):
+        return "Connection failed: OpenAI rejected the minimal request."
+    return "Connection failed safely due to an unexpected provider error."
 
 
 def _main_window(gui_module: Any | None) -> Any | None:
@@ -585,6 +818,20 @@ def _load_qt_widgets() -> Any | None:
             from PySide import QtGui as QtWidgets  # type: ignore
 
             return QtWidgets
+        except Exception:
+            return None
+
+
+def _load_qt_core() -> Any | None:
+    try:  # pragma: no cover - depends on FreeCAD's bundled Qt runtime.
+        from PySide2 import QtCore  # type: ignore
+
+        return QtCore
+    except Exception:
+        try:  # pragma: no cover - legacy FreeCAD/PySide runtime.
+            from PySide import QtCore  # type: ignore
+
+            return QtCore
         except Exception:
             return None
 

@@ -23,6 +23,7 @@ from model_health_assistant.ai_provider import (
     AIRequestRejectedError,
     AIRequestTimeoutError,
     AIUnsupportedSDKError,
+    AIUnsupportedModelError,
 )
 from model_health_assistant.models import ModelHealthReport
 
@@ -106,6 +107,7 @@ def test_provider_errors_share_one_neutral_base_type() -> None:
         AIProviderServerError,
         AIProviderRefusalError,
         AIUnsupportedSDKError,
+        AIUnsupportedModelError,
         AIRateLimitError,
     )
 

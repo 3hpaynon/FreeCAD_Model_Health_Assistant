@@ -40,7 +40,8 @@ _HEALTH_SCORE_DISCLAIMER = (
     "that the model is error-free."
 )
 AI_CONTEXT_PREVIEW_NOTICE = (
-    "Local preview only. No data has been sent to an AI provider."
+    "Final privacy review. No data has been sent. The displayed request is the "
+    "exact request that may be transmitted only after Send to Provider."
 )
 MOCK_EXPLANATION_NOTICE = (
     "This explanation was produced by a deterministic local test provider. "
@@ -82,6 +83,54 @@ class _ReadOnlyTextDialogController:
         activate_window = getattr(self.dialog, "activateWindow", None)
         if callable(activate_window):
             activate_window()
+
+
+class _AIRequestReviewDialogController(_ReadOnlyTextDialogController):
+    """Own one ephemeral consent session for the exact displayed request."""
+
+    def __init__(
+        self,
+        dialog: Any,
+        text_view: Any,
+        status_label: Any,
+        send_button: Any,
+    ) -> None:
+        super().__init__(dialog, text_view)
+        self.status_label = status_label
+        self.send_button = send_button
+        self.consent = None
+        self._send_handler = None
+
+    def update_review(self, review: Any, send_handler: Any) -> None:
+        from model_health_assistant.ai_consent import (
+            AIRequestConsent,
+            AIRequestReview,
+        )
+
+        if not isinstance(review, AIRequestReview):
+            raise TypeError("review must be an AIRequestReview")
+        self.consent = AIRequestConsent(review)
+        self._send_handler = send_handler
+        self.update_text(review.preview_json())
+        self.status_label.setText("")
+        self.send_button.setEnabled(callable(send_handler))
+
+    def cancel(self, *_args: Any) -> None:
+        if self.consent is not None:
+            self.consent.cancel()
+        self.dialog.close()
+
+    def send_to_provider(self, *_args: Any) -> bool:
+        if self.consent is None or not callable(self._send_handler):
+            self.status_label.setText("No reviewed provider request is available.")
+            return False
+        self.consent.approve()
+        error = self._send_handler(self.consent)
+        if error:
+            self.status_label.setText(str(error))
+            return False
+        self.dialog.close()
+        return True
 
 
 class AnalyzeFeatureTreeCommand:
@@ -137,6 +186,11 @@ class _ResultsDialogController:
         preview_ai_context_handler: Any | None = None,
         test_mock_explanation_button: Any | None = None,
         test_mock_explanation_handler: Any | None = None,
+        explain_selected_warning_button: Any | None = None,
+        explain_selected_warning_handler: Any | None = None,
+        explain_full_analysis_button: Any | None = None,
+        explain_full_analysis_handler: Any | None = None,
+        ai_workflow_status_handler: Any | None = None,
     ) -> None:
         self.dialog = dialog
         self.value_labels = value_labels
@@ -158,6 +212,13 @@ class _ResultsDialogController:
         self.preview_ai_context_handler = preview_ai_context_handler
         self.test_mock_explanation_button = test_mock_explanation_button
         self.test_mock_explanation_handler = test_mock_explanation_handler
+        self.explain_selected_warning_button = explain_selected_warning_button
+        self.explain_selected_warning_handler = explain_selected_warning_handler
+        self.explain_full_analysis_button = explain_full_analysis_button
+        self.explain_full_analysis_handler = explain_full_analysis_handler
+        self.ai_workflow_status_handler = ai_workflow_status_handler
+        self._ai_operation_running = False
+        self._ai_operation = None
         self.warning_items: tuple[WarningDisplayItem, ...] = ()
         self.document_context: _AnalyzedDocumentContext | None = None
         self.report_path: Path | None = None
@@ -185,6 +246,7 @@ class _ResultsDialogController:
         self._set_report_actions_enabled(report_path_error is None)
         self._set_preview_ai_context_enabled(report is not None)
         self._set_test_mock_explanation_enabled(report is not None)
+        self._refresh_ai_action_state()
         self.update_status(status_message)
         self._update_warning_table(presentation)
 
@@ -243,6 +305,7 @@ class _ResultsDialogController:
 
         self._set_warning_details("")
         self._set_select_feature_enabled(False)
+        self._refresh_ai_action_state()
         warning = self._selected_warning()
         if warning is None:
             return
@@ -254,6 +317,7 @@ class _ResultsDialogController:
             perform_selection=False,
         )
         self._set_select_feature_enabled(validation_error is None)
+        self._refresh_ai_action_state()
 
     def select_selected_feature(self, *_args: Any) -> bool:
         """Revalidate and select the selected warning's internal feature name."""
@@ -388,6 +452,111 @@ class _ResultsDialogController:
         self.update_status(status)
         return True
 
+    def explain_selected_warning(self, *_args: Any) -> bool:
+        """Open final review for only the currently selected source warning."""
+
+        warning = self._selected_warning()
+        status = self._ai_workflow_status()
+        if self.report is None or warning is None:
+            self._refresh_ai_action_state()
+            self.update_status(
+                "Selected-warning explanation is unavailable: select one warning first."
+            )
+            return False
+        if status is None or not getattr(status, "available", False):
+            self._refresh_ai_action_state()
+            message = getattr(
+                status,
+                "message",
+                "The selected provider is unavailable.",
+            )
+            self.update_status(f"Selected-warning explanation is unavailable: {message}")
+            return False
+        if self._ai_operation_running:
+            self.update_status("An explanation request is already running.")
+            return False
+        if not callable(self.explain_selected_warning_handler):
+            self._refresh_ai_action_state()
+            self.update_status(
+                "Selected-warning explanation is unavailable in this Qt runtime."
+            )
+            return False
+        try:
+            error = self.explain_selected_warning_handler(self)
+        except Exception as exc:
+            error = f"Could not prepare the request safely: {type(exc).__name__}: {exc}"
+        if error:
+            self.update_status(f"Selected-warning explanation failed: {error}")
+            return False
+        self.update_status(
+            "Opened final review for the selected warning. No data was transmitted."
+        )
+        return True
+
+    def explain_full_analysis(self, *_args: Any) -> bool:
+        """Open a fresh final review for the completed full analysis snapshot."""
+
+        status = self._ai_workflow_status()
+        if self.report is None:
+            self._refresh_ai_action_state()
+            self.update_status(
+                "Full-analysis explanation is unavailable: no completed report exists."
+            )
+            return False
+        if status is None or not getattr(status, "available", False):
+            self._refresh_ai_action_state()
+            message = getattr(
+                status,
+                "message",
+                "The selected provider is unavailable.",
+            )
+            self.update_status(f"Full-analysis explanation is unavailable: {message}")
+            return False
+        if self._ai_operation_running:
+            self.update_status("An explanation request is already running.")
+            return False
+        if not callable(self.explain_full_analysis_handler):
+            self._refresh_ai_action_state()
+            self.update_status(
+                "Full-analysis explanation is unavailable in this Qt runtime."
+            )
+            return False
+        try:
+            error = self.explain_full_analysis_handler(self)
+        except Exception as exc:
+            error = f"Could not prepare the request safely: {type(exc).__name__}: {exc}"
+        if error:
+            self.update_status(f"Full-analysis explanation failed: {error}")
+            return False
+        self.update_status(
+            "Opened a fresh final review for the full analysis. No data was "
+            "transmitted."
+        )
+        return True
+
+    def begin_ai_operation(self, message: str) -> bool:
+        """Mark one provider request active and disable competing AI actions."""
+
+        if self._ai_operation_running:
+            return False
+        self._ai_operation_running = True
+        self._refresh_ai_action_state()
+        self.update_status(message)
+        return True
+
+    def complete_ai_operation(self, message: str) -> None:
+        """Return the explanation actions to their request-time readiness state."""
+
+        self._ai_operation_running = False
+        self._ai_operation = None
+        self._refresh_ai_action_state()
+        self.update_status(message)
+
+    def current_selected_warning(self) -> WarningDisplayItem | None:
+        """Return the current table selection for consent revalidation."""
+
+        return self._selected_warning()
+
     def _run_report_action(self, handler: Any, success_message: str) -> bool:
         report_path, error = _validated_report_path(self.report_path)
         if error is None and not callable(handler):
@@ -484,6 +653,58 @@ class _ResultsDialogController:
         if callable(set_enabled):
             set_enabled(enabled and callable(self.test_mock_explanation_handler))
 
+    def _ai_workflow_status(self) -> Any | None:
+        if not callable(self.ai_workflow_status_handler):
+            return None
+        try:
+            return self.ai_workflow_status_handler(self)
+        except Exception:
+            return None
+
+    def _refresh_ai_action_state(self) -> None:
+        status = self._ai_workflow_status()
+        ready = bool(status is not None and getattr(status, "available", False))
+        selected_enabled = (
+            self.report is not None
+            and self._selected_warning() is not None
+            and not self._ai_operation_running
+            and ready
+            and callable(self.explain_selected_warning_handler)
+        )
+        selected_button = self.explain_selected_warning_button
+        set_enabled = getattr(selected_button, "setEnabled", None)
+        if callable(set_enabled):
+            set_enabled(selected_enabled)
+        set_tool_tip = getattr(selected_button, "setToolTip", None)
+        if callable(set_tool_tip):
+            if self._ai_operation_running:
+                tool_tip = "An explanation request is already running."
+            elif self._selected_warning() is None:
+                tool_tip = "Select one warning first."
+            else:
+                tool_tip = getattr(status, "message", "Provider unavailable.")
+            set_tool_tip(tool_tip)
+
+        full_enabled = (
+            self.report is not None
+            and not self._ai_operation_running
+            and ready
+            and callable(self.explain_full_analysis_handler)
+        )
+        full_button = self.explain_full_analysis_button
+        set_enabled = getattr(full_button, "setEnabled", None)
+        if callable(set_enabled):
+            set_enabled(full_enabled)
+        set_tool_tip = getattr(full_button, "setToolTip", None)
+        if callable(set_tool_tip):
+            if self._ai_operation_running:
+                tool_tip = "An explanation request is already running."
+            elif self.report is None:
+                tool_tip = "Run an analysis first."
+            else:
+                tool_tip = getattr(status, "message", "Provider unavailable.")
+            set_tool_tip(tool_tip)
+
     def show(self) -> None:
         """Show and foreground the existing non-modal dialog."""
 
@@ -497,8 +718,9 @@ class _ResultsDialogController:
 
 
 _results_dialog: _ResultsDialogController | None = None
-_ai_context_preview_dialog: _ReadOnlyTextDialogController | None = None
+_ai_context_preview_dialog: _AIRequestReviewDialogController | None = None
 _mock_explanation_dialog: _ReadOnlyTextDialogController | None = None
+_ai_explanation_dialog: _ReadOnlyTextDialogController | None = None
 
 
 def register_command() -> bool:
@@ -857,6 +1079,16 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
         dialog,
     )
     test_mock_explanation_button.setEnabled(False)
+    explain_selected_warning_button = qt_widgets.QPushButton(
+        "Explain Selected Warning",
+        dialog,
+    )
+    explain_selected_warning_button.setEnabled(False)
+    explain_full_analysis_button = qt_widgets.QPushButton(
+        "Explain Full Analysis",
+        dialog,
+    )
+    explain_full_analysis_button.setEnabled(False)
     select_feature_button = qt_widgets.QPushButton("Select Feature", dialog)
     select_feature_button.setEnabled(False)
     button_layout.addWidget(select_feature_button)
@@ -864,6 +1096,8 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     button_layout.addWidget(copy_report_path_button)
     button_layout.addWidget(preview_ai_context_button)
     button_layout.addWidget(test_mock_explanation_button)
+    button_layout.addWidget(explain_selected_warning_button)
+    button_layout.addWidget(explain_full_analysis_button)
     button_layout.addWidget(refresh_analysis_button)
     button_layout.addStretch()
     close_button = qt_widgets.QPushButton("Close", dialog)
@@ -873,6 +1107,7 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     layout.addLayout(button_layout)
 
     qt_services = _load_qt_services()
+    qt_core = None
     open_report_folder_handler = None
     copy_report_path_handler = None
     if qt_services is not None:
@@ -930,6 +1165,27 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
             qt_widgets,
             dialog,
         ),
+        explain_selected_warning_button=explain_selected_warning_button,
+        explain_selected_warning_handler=lambda active_controller: (
+            _start_selected_warning_review(
+                active_controller,
+                qt_widgets,
+                dialog,
+                qt_core,
+            )
+        ),
+        explain_full_analysis_button=explain_full_analysis_button,
+        explain_full_analysis_handler=lambda active_controller: (
+            _start_full_analysis_review(
+                active_controller,
+                qt_widgets,
+                dialog,
+                qt_core,
+            )
+        ),
+        ai_workflow_status_handler=lambda active_controller: (
+            _ai_workflow_status_for_controller(active_controller)
+        ),
     )
     _connect_warning_table_actions(warning_table, controller)
     select_feature_button.clicked.connect(controller.select_selected_feature)
@@ -937,6 +1193,10 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     copy_report_path_button.clicked.connect(controller.copy_report_path)
     preview_ai_context_button.clicked.connect(controller.preview_ai_context)
     test_mock_explanation_button.clicked.connect(controller.test_mock_explanation)
+    explain_selected_warning_button.clicked.connect(
+        controller.explain_selected_warning
+    )
+    explain_full_analysis_button.clicked.connect(controller.explain_full_analysis)
     refresh_analysis_button.clicked.connect(controller.refresh_analysis)
     destroyed_signal = getattr(dialog, "destroyed", None)
     if destroyed_signal is not None and hasattr(destroyed_signal, "connect"):
@@ -949,16 +1209,22 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
 
 
 def _build_ai_context_preview_json(report: ModelHealthReport) -> str:
-    """Return readable JSON for exactly the local allowlisted context object."""
+    """Return the complete standalone privacy review for the retained report."""
 
-    from model_health_assistant.ai_context import build_ai_request_context
+    return _build_ai_context_preview_review(report).preview_json()
 
-    context = build_ai_request_context(report)
-    return json.dumps(
-        context.to_dict(),
-        indent=2,
-        ensure_ascii=False,
-        sort_keys=True,
+
+def _build_ai_context_preview_review(report: ModelHealthReport) -> Any:
+    """Build the exact provider-neutral request shown by standalone preview."""
+
+    from model_health_assistant.ai_consent import build_ai_request_review
+
+    return build_ai_request_review(
+        report,
+        provider_identifier="local-mock",
+        provider_display_name="Local Mock Provider",
+        model_identifier="deterministic-local-v1",
+        request_type="full-analysis",
     )
 
 
@@ -970,7 +1236,7 @@ def _show_ai_context_preview(
     """Create or update the single local context-preview child dialog."""
 
     try:
-        preview_json = _build_ai_context_preview_json(report)
+        review = _build_ai_context_preview_review(report)
     except Exception as exc:
         return (
             "Could not build the privacy-safe context: "
@@ -983,7 +1249,13 @@ def _show_ai_context_preview(
             qt_widgets,
             parent,
         )
-    _ai_context_preview_dialog.update_text(preview_json)
+    _ai_context_preview_dialog.update_review(
+        review,
+        lambda _consent: (
+            "Standalone preview only: choose a specific explanation action before "
+            "a provider request can be sent."
+        ),
+    )
     _ai_context_preview_dialog.show()
     return None
 
@@ -991,7 +1263,7 @@ def _show_ai_context_preview(
 def _create_ai_context_preview_dialog(
     qt_widgets: Any,
     parent: Any,
-) -> _ReadOnlyTextDialogController:
+) -> _AIRequestReviewDialogController:
     dialog = qt_widgets.QDialog(parent)
     dialog.setWindowTitle("Preview AI Context — Local Only")
     dialog.setModal(False)
@@ -1007,15 +1279,29 @@ def _create_ai_context_preview_dialog(
     context_view.setReadOnly(True)
     layout.addWidget(context_view)
 
+    status_label = qt_widgets.QLabel("", dialog)
+    if hasattr(status_label, "setWordWrap"):
+        status_label.setWordWrap(True)
+    layout.addWidget(status_label)
+
     button_layout = qt_widgets.QHBoxLayout()
     button_layout.addStretch()
-    close_button = qt_widgets.QPushButton("Close", dialog)
-    close_button.setShortcut("Esc")
-    close_button.clicked.connect(dialog.close)
-    button_layout.addWidget(close_button)
+    cancel_button = qt_widgets.QPushButton("Cancel", dialog)
+    cancel_button.setShortcut("Esc")
+    send_button = qt_widgets.QPushButton("Send to Provider", dialog)
+    send_button.setEnabled(False)
+    button_layout.addWidget(cancel_button)
+    button_layout.addWidget(send_button)
     layout.addLayout(button_layout)
 
-    controller = _ReadOnlyTextDialogController(dialog, context_view)
+    controller = _AIRequestReviewDialogController(
+        dialog,
+        context_view,
+        status_label,
+        send_button,
+    )
+    cancel_button.clicked.connect(controller.cancel)
+    send_button.clicked.connect(controller.send_to_provider)
     destroyed_signal = getattr(dialog, "destroyed", None)
     if destroyed_signal is not None and hasattr(destroyed_signal, "connect"):
         destroyed_signal.connect(
@@ -1027,11 +1313,421 @@ def _create_ai_context_preview_dialog(
 
 
 def _clear_ai_context_preview_dialog(
-    controller: _ReadOnlyTextDialogController,
+    controller: _AIRequestReviewDialogController,
 ) -> None:
     global _ai_context_preview_dialog
     if _ai_context_preview_dialog is controller:
         _ai_context_preview_dialog = None
+
+
+def _ai_workflow_status_for_controller(
+    controller: _ResultsDialogController,
+) -> Any:
+    """Return non-secret provider readiness for the active results dialog."""
+
+    try:
+        return _build_ai_explanation_workflow(controller).status()
+    except Exception:
+        from model_health_assistant.ai_workflow import AIWorkflowStatus
+
+        return AIWorkflowStatus(
+            provider_identifier="",
+            provider_display_name="Selected provider",
+            model_identifier="",
+            available=False,
+            status_code="runtime_unavailable",
+            message="Explanation provider services are unavailable in this runtime.",
+        )
+
+
+def _build_ai_explanation_workflow(
+    controller: _ResultsDialogController,
+) -> Any:
+    """Create a request-time workflow from current settings and secure storage."""
+
+    from model_health_assistant.ai_workflow import AIExplanationWorkflow
+    from model_health_assistant.credentials import ProviderCredentialStore
+    from model_health_assistant.freecad_provider_settings import (
+        FreeCADProviderSettingsBackend,
+    )
+    from model_health_assistant.keyring_backend import KeyringCredentialBackend
+    from model_health_assistant.provider_settings import ProviderSettingsStore
+
+    app_module = (
+        controller.document_context.app_module
+        if controller.document_context is not None
+        else App
+    )
+    if app_module is None:
+        raise RuntimeError("FreeCAD provider settings are unavailable")
+    settings_store = ProviderSettingsStore(
+        FreeCADProviderSettingsBackend(app_module)
+    )
+    credential_store = ProviderCredentialStore(KeyringCredentialBackend())
+    return AIExplanationWorkflow(
+        settings_store.load,
+        credential_store=credential_store,
+    )
+
+
+def _start_selected_warning_review(
+    controller: _ResultsDialogController,
+    qt_widgets: Any,
+    parent: Any,
+    qt_core: Any | None,
+) -> str | None:
+    """Build and show final consent for only the selected warning."""
+
+    report = controller.report
+    warning = controller.current_selected_warning()
+    if report is None or warning is None:
+        return "Select one warning from the completed analysis first."
+    if qt_core is None:
+        return "Background provider execution is unavailable in this Qt runtime."
+    target_error = _validate_selected_warning_snapshot(
+        controller.document_context,
+        warning,
+    )
+    if target_error:
+        return target_error
+
+    try:
+        workflow = _build_ai_explanation_workflow(controller)
+        review = workflow.build_review(
+            report,
+            request_type="selected-warning",
+            selected_warning_identifier=warning.warning_id,
+        )
+    except Exception as exc:
+        return _explanation_error_text(exc)
+
+    def send_handler(consent: Any) -> str | None:
+        current_report = controller.report
+        current_warning = controller.current_selected_warning()
+        if current_report is None or current_warning is None:
+            return "The report or warning selection changed; review the request again."
+        validation_error = _validate_selected_warning_snapshot(
+            controller.document_context,
+            current_warning,
+        )
+        if validation_error:
+            return validation_error
+        if not controller.begin_ai_operation(
+            "Request in progress. The model remains read-only."
+        ):
+            return "Another explanation request is already running."
+
+        from model_health_assistant.qt_async import start_qt_background_operation
+
+        try:
+            controller._ai_operation = start_qt_background_operation(
+                qt_core,
+                parent,
+                lambda: workflow.execute_review(
+                    consent,
+                    current_report,
+                    selected_warning_identifier=current_warning.warning_id,
+                ),
+                lambda response: _selected_explanation_succeeded(
+                    controller,
+                    response,
+                    current_warning,
+                    review,
+                    qt_widgets,
+                    parent,
+                ),
+                lambda error: _explanation_failed(controller, error),
+            )
+        except Exception as exc:
+            controller.complete_ai_operation(
+                "Explanation failed: " + _explanation_error_text(exc)
+            )
+            return _explanation_error_text(exc)
+        return None
+
+    global _ai_context_preview_dialog
+    if _ai_context_preview_dialog is None:
+        _ai_context_preview_dialog = _create_ai_context_preview_dialog(
+            qt_widgets,
+            parent,
+        )
+    _ai_context_preview_dialog.dialog.setWindowTitle(
+        "Final Review - Explain Selected Warning"
+    )
+    _ai_context_preview_dialog.update_review(review, send_handler)
+    _ai_context_preview_dialog.show()
+    return None
+
+
+def _validate_selected_warning_snapshot(
+    context: _AnalyzedDocumentContext | None,
+    warning: WarningDisplayItem,
+) -> str | None:
+    """Fail closed if the analyzed document or warning target changed."""
+
+    error = _select_feature_by_internal_name(
+        context,
+        warning.feature_internal_name,
+        perform_selection=False,
+    )
+    if error:
+        return (
+            error
+            + " Refresh the analysis and review a newly generated request."
+        )
+    return None
+
+
+def _start_full_analysis_review(
+    controller: _ResultsDialogController,
+    qt_widgets: Any,
+    parent: Any,
+    qt_core: Any | None,
+) -> str | None:
+    """Build a distinct fresh consent review for the full analysis snapshot."""
+
+    report = controller.report
+    if report is None:
+        return "Run an analysis before requesting a full explanation."
+    if qt_core is None:
+        return "Background provider execution is unavailable in this Qt runtime."
+    try:
+        workflow = _build_ai_explanation_workflow(controller)
+        review = workflow.build_review(
+            report,
+            request_type="full-analysis",
+        )
+    except Exception as exc:
+        return _explanation_error_text(exc)
+
+    def send_handler(consent: Any) -> str | None:
+        current_report = controller.report
+        if current_report is None:
+            return "The completed report changed; review a fresh request."
+        if not controller.begin_ai_operation(
+            "Full-analysis request in progress. The model remains read-only."
+        ):
+            return "Another explanation request is already running."
+
+        from model_health_assistant.qt_async import start_qt_background_operation
+
+        try:
+            controller._ai_operation = start_qt_background_operation(
+                qt_core,
+                parent,
+                lambda: workflow.execute_review(consent, current_report),
+                lambda response: _full_explanation_succeeded(
+                    controller,
+                    response,
+                    review,
+                    qt_widgets,
+                    parent,
+                ),
+                lambda error: _explanation_failed(controller, error),
+            )
+        except Exception as exc:
+            controller.complete_ai_operation(
+                "Full-analysis explanation failed: "
+                + _explanation_error_text(exc)
+            )
+            return _explanation_error_text(exc)
+        return None
+
+    global _ai_context_preview_dialog
+    if _ai_context_preview_dialog is None:
+        _ai_context_preview_dialog = _create_ai_context_preview_dialog(
+            qt_widgets,
+            parent,
+        )
+    _ai_context_preview_dialog.dialog.setWindowTitle(
+        "Final Review - Explain Full Analysis"
+    )
+    _ai_context_preview_dialog.update_review(review, send_handler)
+    _ai_context_preview_dialog.show()
+    return None
+
+
+def _selected_explanation_succeeded(
+    controller: _ResultsDialogController,
+    response: Any,
+    source_warning: WarningDisplayItem,
+    review: Any,
+    qt_widgets: Any,
+    parent: Any,
+) -> None:
+    from model_health_assistant.ai_result_presentation import (
+        format_selected_warning_explanation,
+    )
+
+    try:
+        text = format_selected_warning_explanation(
+            response,
+            source_warning,
+            review,
+        )
+    except Exception as exc:
+        _explanation_failed(controller, exc)
+        return
+    _show_ai_explanation_text(
+        text,
+        "Selected Warning AI Explanation",
+        qt_widgets,
+        parent,
+    )
+    controller.complete_ai_operation(
+        "Explanation completed. The original warning and advisory AI text are "
+        "shown separately; no model changes were made."
+    )
+
+
+def _full_explanation_succeeded(
+    controller: _ResultsDialogController,
+    response: Any,
+    review: Any,
+    qt_widgets: Any,
+    parent: Any,
+) -> None:
+    from model_health_assistant.ai_result_presentation import (
+        format_full_analysis_explanation,
+    )
+
+    try:
+        text = format_full_analysis_explanation(response, review)
+    except Exception as exc:
+        _explanation_failed(controller, exc)
+        return
+    _show_ai_explanation_text(
+        text,
+        "Full Analysis AI Explanation",
+        qt_widgets,
+        parent,
+    )
+    controller.complete_ai_operation(
+        "Full-analysis explanation completed. The advisory response is read-only; "
+        "no model changes were made."
+    )
+
+
+def _explanation_failed(
+    controller: _ResultsDialogController,
+    error: BaseException,
+) -> None:
+    controller.complete_ai_operation(
+        "Explanation failed: " + _explanation_error_text(error)
+    )
+
+
+def _explanation_error_text(error: BaseException) -> str:
+    """Map workflow/provider failures to concise messages without secret data."""
+
+    from model_health_assistant.ai_consent import AIConsentError
+    from model_health_assistant.ai_provider import (
+        AIAuthenticationError,
+        AIConnectionError,
+        AIInvalidRequestError,
+        AIInvalidResponseError,
+        AIMissingCredentialError,
+        AIPermissionError,
+        AIProviderRefusalError,
+        AIProviderServerError,
+        AIProviderUnavailableError,
+        AIRateLimitError,
+        AIRequestTimeoutError,
+        AIUnsupportedModelError,
+    )
+    from model_health_assistant.ai_workflow import AIWorkflowUnavailableError
+
+    if isinstance(error, AIConsentError):
+        return str(error)
+    if isinstance(error, AIMissingCredentialError):
+        return "No provider API key is configured in secure storage."
+    if isinstance(error, AIAuthenticationError):
+        return "The provider rejected the configured API key."
+    if isinstance(error, AIPermissionError):
+        return "The configured account is not permitted to make this request."
+    if isinstance(error, AIUnsupportedModelError):
+        return "The selected model is not supported by the provider account."
+    if isinstance(error, AIRateLimitError):
+        return "The provider rate limit was reached. Try again later."
+    if isinstance(error, AIRequestTimeoutError):
+        return "The provider request timed out without a usable result."
+    if isinstance(error, AIConnectionError):
+        return "The provider could not be reached. Check the network connection."
+    if isinstance(error, AIProviderServerError):
+        return "The provider reported a temporary server error."
+    if isinstance(error, AIProviderRefusalError):
+        return "The provider refused the explanation request; no explanation was shown."
+    if isinstance(error, AIInvalidResponseError):
+        return "The provider returned invalid structured output; it was not shown."
+    if isinstance(error, AIInvalidRequestError):
+        return "The provider rejected the structured explanation request."
+    if isinstance(error, (AIWorkflowUnavailableError, AIProviderUnavailableError)):
+        return str(error)
+    return f"The explanation failed safely ({type(error).__name__})."
+
+
+def _show_ai_explanation_text(
+    text: str,
+    title: str,
+    qt_widgets: Any,
+    parent: Any,
+) -> None:
+    global _ai_explanation_dialog
+    if _ai_explanation_dialog is None:
+        _ai_explanation_dialog = _create_ai_explanation_dialog(
+            qt_widgets,
+            parent,
+        )
+    _ai_explanation_dialog.dialog.setWindowTitle(title)
+    _ai_explanation_dialog.update_text(text)
+    _ai_explanation_dialog.show()
+
+
+def _create_ai_explanation_dialog(
+    qt_widgets: Any,
+    parent: Any,
+) -> _ReadOnlyTextDialogController:
+    dialog = qt_widgets.QDialog(parent)
+    dialog.setWindowTitle("AI Explanation")
+    dialog.setModal(False)
+    dialog.setMinimumSize(760, 560)
+
+    layout = qt_widgets.QVBoxLayout(dialog)
+    notice_label = qt_widgets.QLabel(
+        "Read-only advisory explanation. No model actions are available here.",
+        dialog,
+    )
+    if hasattr(notice_label, "setWordWrap"):
+        notice_label.setWordWrap(True)
+    layout.addWidget(notice_label)
+    explanation_view = qt_widgets.QPlainTextEdit(dialog)
+    explanation_view.setReadOnly(True)
+    layout.addWidget(explanation_view)
+    close_button = qt_widgets.QPushButton("Close", dialog)
+    close_button.setShortcut("Esc")
+    close_button.clicked.connect(dialog.close)
+    button_layout = qt_widgets.QHBoxLayout()
+    button_layout.addStretch()
+    button_layout.addWidget(close_button)
+    layout.addLayout(button_layout)
+
+    controller = _ReadOnlyTextDialogController(dialog, explanation_view)
+    destroyed_signal = getattr(dialog, "destroyed", None)
+    if destroyed_signal is not None and hasattr(destroyed_signal, "connect"):
+        destroyed_signal.connect(
+            lambda *_args, held_controller=controller: _clear_ai_explanation_dialog(
+                held_controller
+            )
+        )
+    return controller
+
+
+def _clear_ai_explanation_dialog(
+    controller: _ReadOnlyTextDialogController,
+) -> None:
+    global _ai_explanation_dialog
+    if _ai_explanation_dialog is controller:
+        _ai_explanation_dialog = None
 
 
 def _show_mock_explanation(

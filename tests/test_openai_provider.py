@@ -25,10 +25,12 @@ from model_health_assistant.ai_provider import (
     AIRateLimitError,
     AIRequestTimeoutError,
     AIUnsupportedSDKError,
+    AIUnsupportedModelError,
 )
 from model_health_assistant.openai_provider import (
     DEFAULT_OPENAI_MODEL_IDENTIFIER,
     OPENAI_EXPLANATION_RESPONSE_SCHEMA,
+    OPENAI_CONNECTION_RESPONSE_SCHEMA,
     OPENAI_PROVIDER_IDENTIFIER,
     OpenAIExplanationProvider,
     OpenAIProviderConfiguration,
@@ -312,7 +314,7 @@ def test_refusal_becomes_controlled_error_without_refusal_text() -> None:
         (_APIConnectionError, AIConnectionError),
         (_BadRequestError, AIInvalidRequestError),
         (_UnprocessableEntityError, AIInvalidRequestError),
-        (_NotFoundError, AIInvalidRequestError),
+        (_NotFoundError, AIUnsupportedModelError),
         (_InternalServerError, AIProviderServerError),
     ],
 )
@@ -471,3 +473,66 @@ def test_absolute_report_path_never_reaches_provider_arguments() -> None:
     serialized_arguments = json.dumps(responses.calls[0], sort_keys=True)
     assert "C:\\\\private\\\\model.FCStd" not in serialized_arguments
     assert "/home/private/model.FCStd" not in serialized_arguments
+
+
+def test_explicit_connection_test_uses_minimal_non_cad_structured_request() -> None:
+    response = SimpleNamespace(
+        id="resp_connection_123",
+        model="gpt-5.6-terra-connection-snapshot",
+        output_text=json.dumps({"schema_version": "1.0", "status": "ok"}),
+        output=[],
+        usage=SimpleNamespace(
+            input_tokens=12,
+            output_tokens=5,
+            total_tokens=17,
+            output_tokens_details=SimpleNamespace(reasoning_tokens=0),
+        ),
+    )
+    responses = _FakeResponses(response=response)
+
+    result = _provider_with_responses(responses).test_connection()
+
+    assert result.provider_identifier == "openai"
+    assert result.actual_model_identifier == "gpt-5.6-terra-connection-snapshot"
+    assert result.request_identifier == "resp_connection_123"
+    assert result.usage is not None
+    assert result.usage.total_tokens == 17
+    arguments = responses.calls[0]
+    assert arguments["input"] == "Return status ok using the required schema."
+    assert arguments["max_output_tokens"] == 64
+    assert arguments["store"] is False
+    assert arguments["tools"] == []
+    assert arguments["text"]["format"]["schema"] == (
+        OPENAI_CONNECTION_RESPONSE_SCHEMA
+    )
+    serialized = json.dumps(arguments, sort_keys=True).casefold()
+    for forbidden in (
+        ".fcstd",
+        "document_name",
+        "feature001",
+        "health_score",
+        "model-health report",
+        _TEST_CREDENTIAL.casefold(),
+    ):
+        assert forbidden not in serialized
+
+
+@pytest.mark.parametrize(
+    "output_text",
+    [
+        "not-json",
+        json.dumps({"schema_version": "1.0", "status": "wrong"}),
+        json.dumps({"schema_version": "1.0", "status": "ok", "extra": True}),
+    ],
+)
+def test_connection_test_rejects_invalid_structured_output(output_text: str) -> None:
+    response = SimpleNamespace(
+        id="resp_invalid_connection",
+        model="gpt-5.6-terra",
+        output_text=output_text,
+        output=[],
+        usage=None,
+    )
+
+    with pytest.raises(AIInvalidResponseError):
+        _provider_with_responses(_FakeResponses(response=response)).test_connection()

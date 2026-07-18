@@ -18,6 +18,8 @@ from model_health_assistant.ai_service import (
     AIContextBuildError,
     AIExplanationService,
 )
+from model_health_assistant.ai_context import build_ai_request_context
+from model_health_assistant.ai_prompts import build_ai_explanation_request
 from model_health_assistant.mock_ai_provider import LocalMockAIProvider
 from model_health_assistant.models import FeatureInfo, ModelHealthReport, RiskWarning
 
@@ -83,6 +85,23 @@ def test_service_executes_successful_mock_request() -> None:
     assert len(response.warning_explanations) == 1
     assert response.warning_explanations[0].rule_id == "confirmed_recompute_error"
     assert response.warning_explanations[0].affected_feature_internal_name == "Pocket001"
+
+
+def test_service_executes_the_already_reviewed_request_without_rebuilding_it() -> None:
+    request = build_ai_explanation_request(build_ai_request_context(_report()))
+
+    class RecordingProvider(LocalMockAIProvider):
+        received = None
+
+        def explain(self, received):
+            self.received = received
+            return super().explain(received)
+
+    provider = RecordingProvider()
+    response = AIExplanationService(provider).explain_request(request)
+
+    assert provider.received is request
+    assert response.warning_explanations[0].warning_id == "WARN-001"
 
 
 def test_service_handles_empty_warning_report() -> None:

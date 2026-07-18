@@ -1142,6 +1142,197 @@ def test_warning_table_double_click_reuses_selection_action() -> None:
     assert calls == ["details", "select"]
 
 
+def test_selected_warning_explanation_action_requires_selection_provider_and_idle_state() -> None:
+    class FakeButton:
+        def __init__(self) -> None:
+            self.enabled = None
+            self.tooltip = ""
+
+        def setEnabled(self, enabled: bool) -> None:  # noqa: N802
+            self.enabled = enabled
+
+        def setToolTip(self, text: str) -> None:  # noqa: N802
+            self.tooltip = text
+
+    class FakeItem:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class FakeTable:
+        def __init__(self) -> None:
+            self.rows = []
+            self.selected_row = None
+
+        def clearSelection(self) -> None:  # noqa: N802
+            self.selected_row = None
+
+        def setRowCount(self, count: int) -> None:  # noqa: N802
+            self.rows = [[None, None, None, None] for _ in range(count)]
+
+        def setItem(self, row, column, item) -> None:  # noqa: N802
+            self.rows[row][column] = item
+
+        def selectedItems(self):  # noqa: N802
+            return [] if self.selected_row is None else self.rows[self.selected_row]
+
+        def currentRow(self) -> int:  # noqa: N802
+            return -1 if self.selected_row is None else self.selected_row
+
+    labels = {
+        key: SimpleNamespace(setText=lambda _text: None)
+        for key in (
+            "document",
+            "score",
+            "meaningful_features",
+            "sketches",
+            "warnings",
+            "report",
+        )
+    }
+    status_values = {}
+    status_label = SimpleNamespace(
+        setText=lambda text: status_values.update(text=text),
+        setVisible=lambda visible: status_values.update(visible=visible),
+    )
+    table = FakeTable()
+    button = FakeButton()
+    calls = []
+    ready = SimpleNamespace(available=True, message="Provider ready.")
+    controller = ui._ResultsDialogController(
+        SimpleNamespace(),
+        labels,
+        warning_table=table,
+        table_item_factory=FakeItem,
+        status_label=status_label,
+        explain_selected_warning_button=button,
+        explain_selected_warning_handler=lambda active: calls.append(active),
+        ai_workflow_status_handler=lambda _active: ready,
+    )
+    warning = _warning_item("WARN-1", "high")
+    report = _ai_preview_report()
+
+    controller.update_presentation(
+        _presentation(warning_items=(warning,), total_warning_count=1),
+        report=report,
+    )
+    assert button.enabled is False
+    assert button.tooltip == "Select one warning first."
+
+    table.selected_row = 0
+    controller.update_selected_warning_details()
+    assert button.enabled is True
+    assert controller.explain_selected_warning() is True
+    assert calls == [controller]
+    assert "No data was transmitted" in status_values["text"]
+
+    assert controller.begin_ai_operation("Request in progress") is True
+    assert button.enabled is False
+    assert controller.begin_ai_operation("Duplicate") is False
+    controller.complete_ai_operation("Done")
+    assert button.enabled is True
+
+    ready.available = False
+    ready.message = "API key missing."
+    controller.update_selected_warning_details()
+    assert button.enabled is False
+    assert "API key missing" in button.tooltip
+    assert controller.explain_selected_warning() is False
+    assert "API key missing" in status_values["text"]
+
+
+def test_explanation_error_messages_distinguish_provider_failures_without_secrets() -> None:
+    from model_health_assistant.ai_provider import (
+        AIAuthenticationError,
+        AIConnectionError,
+        AIInvalidResponseError,
+        AIRateLimitError,
+        AIRequestTimeoutError,
+    )
+
+    messages = [
+        ui._explanation_error_text(AIAuthenticationError("sk-secret-value")),
+        ui._explanation_error_text(AIRateLimitError("provider details")),
+        ui._explanation_error_text(AIRequestTimeoutError("provider details")),
+        ui._explanation_error_text(AIConnectionError("provider details")),
+        ui._explanation_error_text(AIInvalidResponseError("provider details")),
+    ]
+
+    assert "rejected the configured API key" in messages[0]
+    assert "rate limit" in messages[1]
+    assert "timed out" in messages[2]
+    assert "could not be reached" in messages[3]
+    assert "invalid structured output" in messages[4]
+    assert all("sk-secret-value" not in message for message in messages)
+
+
+def test_full_analysis_action_requires_report_provider_and_idle_not_warning_selection() -> None:
+    class FakeButton:
+        def __init__(self) -> None:
+            self.enabled = None
+            self.tooltip = ""
+
+        def setEnabled(self, enabled: bool) -> None:  # noqa: N802
+            self.enabled = enabled
+
+        def setToolTip(self, text: str) -> None:  # noqa: N802
+            self.tooltip = text
+
+    labels = {
+        key: SimpleNamespace(setText=lambda _text: None)
+        for key in (
+            "document",
+            "score",
+            "meaningful_features",
+            "sketches",
+            "warnings",
+            "report",
+        )
+    }
+    messages = {}
+    status_label = SimpleNamespace(
+        setText=lambda text: messages.update(text=text),
+        setVisible=lambda visible: messages.update(visible=visible),
+    )
+    full_button = FakeButton()
+    selected_button = FakeButton()
+    calls = []
+    readiness = SimpleNamespace(available=True, message="Provider ready.")
+    controller = ui._ResultsDialogController(
+        SimpleNamespace(),
+        labels,
+        status_label=status_label,
+        explain_selected_warning_button=selected_button,
+        explain_selected_warning_handler=lambda _active: None,
+        explain_full_analysis_button=full_button,
+        explain_full_analysis_handler=lambda active: calls.append(active),
+        ai_workflow_status_handler=lambda _active: readiness,
+    )
+
+    controller.update_presentation(
+        _presentation(warning_items=(), total_warning_count=0),
+        report=_ai_preview_report(),
+    )
+    assert selected_button.enabled is False
+    assert full_button.enabled is True
+    assert controller.explain_full_analysis() is True
+    assert calls == [controller]
+    assert "fresh final review" in messages["text"]
+    assert "No data was transmitted" in messages["text"]
+
+    assert controller.begin_ai_operation("Running") is True
+    assert selected_button.enabled is False
+    assert full_button.enabled is False
+    controller.complete_ai_operation("Done")
+    assert full_button.enabled is True
+
+    readiness.available = False
+    readiness.message = "Provider unavailable."
+    controller._refresh_ai_action_state()
+    assert full_button.enabled is False
+    assert controller.explain_full_analysis() is False
+    assert "Provider unavailable" in messages["text"]
+
+
 def _ai_preview_report() -> ModelHealthReport:
     feature = FeatureInfo(
         internal_name="Pocket001",
@@ -1186,12 +1377,16 @@ def test_ai_context_preview_json_is_allowlisted_readable_and_local(monkeypatch) 
     preview_json = ui._build_ai_context_preview_json(_ai_preview_report())
     data = json.loads(preview_json)
 
-    assert data["schema_version"] == "1.0"
-    assert data["health_score"] == 70
-    assert data["total_warning_count"] == 1
-    assert data["warnings"][0]["rule_id"] == "confirmed_recompute_error"
-    assert data["warnings"][0]["severity"] == "high"
-    assert data["metadata"]["limit_policy_version"] == "context-limits-v1"
+    context = data["privacy_safe_context"]
+    assert data["provider"]["identifier"] == "local-mock"
+    assert data["request_type"] == "full-analysis"
+    assert data["context_schema_version"] == "1.0"
+    assert context["health_score"] == 70
+    assert context["total_warning_count"] == 1
+    assert context["warnings"][0]["rule_id"] == "confirmed_recompute_error"
+    assert context["warnings"][0]["severity"] == "high"
+    assert context["metadata"]["limit_policy_version"] == "context-limits-v1"
+    assert data["provider_request"]["context"] == context
     assert "C:\\Users" not in preview_json
     assert "private-user" not in preview_json
     assert "report_path" not in preview_json
@@ -1272,6 +1467,9 @@ def test_context_preview_reuses_one_dialog_controller(monkeypatch) -> None:
         def update_text(self, text: str) -> None:
             self.texts.append(text)
 
+        def update_review(self, review, _handler) -> None:
+            self.texts.append(review.preview_json())
+
         def show(self) -> None:
             self.show_count += 1
 
@@ -1302,7 +1500,7 @@ def test_context_preview_reports_builder_failure_without_opening_dialog(
 ) -> None:
     monkeypatch.setattr(
         ui,
-        "_build_ai_context_preview_json",
+        "_build_ai_context_preview_review",
         lambda _report: (_ for _ in ()).throw(ValueError("malformed evidence")),
     )
     monkeypatch.setattr(ui, "_ai_context_preview_dialog", None)
@@ -1393,9 +1591,13 @@ def test_ai_context_preview_dialog_is_parented_read_only_and_closable() -> None:
             self.parent = parent
             self.clicked = FakeSignal()
             self.shortcut = None
+            self.enabled = True
 
         def setShortcut(self, shortcut: str) -> None:  # noqa: N802
             self.shortcut = shortcut
+
+        def setEnabled(self, enabled: bool) -> None:  # noqa: N802
+            self.enabled = enabled
 
     labels = []
     text_views = []
@@ -1420,8 +1622,10 @@ def test_ai_context_preview_dialog_is_parented_read_only_and_closable() -> None:
     assert labels[0].word_wrap is True
     assert text_views[0].read_only is True
     assert text_views[0].text == '{"schema_version": "1.0"}'
-    assert buttons[0].text == "Close"
+    assert buttons[0].text == "Cancel"
     assert buttons[0].shortcut == "Esc"
+    assert buttons[1].text == "Send to Provider"
+    assert buttons[1].enabled is False
 
 
 def test_ai_context_preview_performs_no_network_access(monkeypatch) -> None:
@@ -1435,7 +1639,36 @@ def test_ai_context_preview_performs_no_network_access(monkeypatch) -> None:
 
     preview_json = ui._build_ai_context_preview_json(_ai_preview_report())
 
-    assert json.loads(preview_json)["schema_version"] == "1.0"
+    assert json.loads(preview_json)["context_schema_version"] == "1.0"
+
+
+def test_request_review_dialog_requires_explicit_send_or_cancel() -> None:
+    closed = []
+    displayed = []
+    statuses = []
+    enabled = []
+    controller = ui._AIRequestReviewDialogController(
+        SimpleNamespace(close=lambda: closed.append(True)),
+        SimpleNamespace(setPlainText=displayed.append),
+        SimpleNamespace(setText=statuses.append),
+        SimpleNamespace(setEnabled=enabled.append),
+    )
+    review = ui._build_ai_context_preview_review(_ai_preview_report())
+    sends = []
+    controller.update_review(review, lambda consent: sends.append(consent) or None)
+
+    assert controller.consent.approved is False
+    assert displayed[-1] == review.preview_json()
+    assert enabled[-1] is True
+    assert controller.send_to_provider() is True
+    assert len(sends) == 1
+    assert sends[0].approved is True
+    assert closed == [True]
+
+    controller.update_review(review, lambda _consent: None)
+    controller.cancel()
+    assert controller.consent.approved is False
+    assert closed == [True, True]
 
 
 def test_results_controller_runs_mock_for_exact_retained_report() -> None:

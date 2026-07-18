@@ -10,6 +10,10 @@ from dataclasses import dataclass
 from types import ModuleType
 from typing import Any
 
+from model_health_assistant.ai_connection import (
+    AI_CONNECTION_SCHEMA_VERSION,
+    AIConnectionTestResult,
+)
 from model_health_assistant.ai_models import (
     AI_RESPONSE_SCHEMA_VERSION,
     AIExplanationRequest,
@@ -31,6 +35,7 @@ from model_health_assistant.ai_provider import (
     AIRateLimitError,
     AIRequestTimeoutError,
     AIUnsupportedSDKError,
+    AIUnsupportedModelError,
 )
 from model_health_assistant.ai_service import validate_ai_explanation_response
 from model_health_assistant.credentials import (
@@ -117,6 +122,19 @@ OPENAI_EXPLANATION_RESPONSE_SCHEMA: dict[str, object] = {
         "warning_explanations",
         "limitations",
     ],
+}
+
+OPENAI_CONNECTION_RESPONSE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "schema_version": {
+            "type": "string",
+            "enum": [AI_CONNECTION_SCHEMA_VERSION],
+        },
+        "status": {"type": "string", "enum": ["ok"]},
+    },
+    "required": ["schema_version", "status"],
 }
 
 ModuleImporter = Callable[[str], ModuleType]
@@ -246,6 +264,112 @@ class OpenAIExplanationProvider:
                 "OpenAI returned no provider-neutral explanation response."
             )
         return provider_response
+
+    def test_connection(self) -> AIConnectionTestResult:
+        """Run one explicit minimal request containing no CAD or report data."""
+
+        result = self._execute_with_client(self._run_connection_request)
+        if not isinstance(result, AIConnectionTestResult):
+            raise AIInvalidResponseError(
+                "OpenAI returned no validated connection-test result."
+            )
+        return result
+
+    def _run_connection_request(self, client: object) -> AIConnectionTestResult:
+        create_response = _response_create_method(client)
+        sdk_response = create_response(**self._connection_request_arguments())
+        request_identifier = _optional_text(getattr(sdk_response, "id", None))
+        if _response_contains_refusal(sdk_response):
+            raise AIProviderRefusalError(
+                "OpenAI declined the minimal connection test.",
+                request_identifier=request_identifier,
+            )
+        payload = _structured_payload(
+            getattr(sdk_response, "output_text", None),
+            "connection test",
+        )
+        if not isinstance(payload, Mapping) or set(payload) != {
+            "schema_version",
+            "status",
+        }:
+            raise AIInvalidResponseError(
+                "OpenAI returned an invalid connection-test response."
+            )
+        if (
+            payload.get("schema_version") != AI_CONNECTION_SCHEMA_VERSION
+            or payload.get("status") != "ok"
+        ):
+            raise AIInvalidResponseError(
+                "OpenAI returned an unsupported connection-test response."
+            )
+        return AIConnectionTestResult(
+            provider_identifier=OPENAI_PROVIDER_IDENTIFIER,
+            provider_display_name=OPENAI_PROVIDER_DISPLAY_NAME,
+            actual_model_identifier=_optional_text(
+                getattr(sdk_response, "model", None)
+            ),
+            request_identifier=request_identifier,
+            usage=_usage_metadata(getattr(sdk_response, "usage", None)),
+        )
+
+    def _execute_with_client(
+        self,
+        operation: Callable[[object], object],
+    ) -> object:
+        """Execute one SDK operation while containing credentials and errors."""
+
+        credential = self._retrieve_credential()
+        client = None
+        sdk_module = None
+        result = None
+        controlled_error: AIProviderError | None = None
+        try:
+            sdk_module = self._load_sdk_module()
+            client = self._create_client(sdk_module, credential)
+            result = operation(client)
+        except AIProviderError as error:
+            controlled_error = error
+        except Exception as error:
+            controlled_error = _map_sdk_error(error, sdk_module)
+        finally:
+            credential = ""
+            client = None
+
+        if controlled_error is not None:
+            raise controlled_error
+        return result
+
+    def _connection_request_arguments(self) -> dict[str, object]:
+        return {
+            "model": self._configuration.model_identifier,
+            "instructions": (
+                "Return only the requested connection-test JSON. This request "
+                "contains no CAD, document, feature, or model-health data."
+            ),
+            "input": "Return status ok using the required schema.",
+            "max_output_tokens": 64,
+            "reasoning": {"effort": "none"},
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "provider_connection_test",
+                    "strict": True,
+                    "schema": deepcopy(OPENAI_CONNECTION_RESPONSE_SCHEMA),
+                },
+                "verbosity": "low",
+            },
+            "metadata": {
+                "application": "freecad-model-health-assistant",
+                "purpose": "provider_connection_test",
+                "response_schema_version": AI_CONNECTION_SCHEMA_VERSION,
+            },
+            "store": False,
+            "background": False,
+            "stream": False,
+            "tools": [],
+            "tool_choice": "none",
+            "parallel_tool_calls": False,
+        }
 
     def _retrieve_credential(self) -> str:
         controlled_error: AIProviderError | None = None
@@ -410,6 +534,24 @@ def _response_create_method(client: object) -> Callable[..., object]:
     return create
 
 
+def _structured_payload(output_text: object, purpose: str) -> object:
+    if not isinstance(output_text, str) or not output_text.strip():
+        raise AIInvalidResponseError(
+            f"OpenAI returned no structured {purpose} content."
+        )
+    malformed_payload = False
+    try:
+        payload = json.loads(output_text)
+    except (TypeError, ValueError):
+        malformed_payload = True
+        payload = None
+    if malformed_payload:
+        raise AIInvalidResponseError(
+            f"OpenAI returned malformed structured {purpose} content."
+        )
+    return payload
+
+
 def _provider_response_from_payload(
     payload: object,
     *,
@@ -550,7 +692,11 @@ def _map_sdk_error(error: Exception, sdk_module: ModuleType | None) -> AIProvide
             AIInvalidRequestError,
             "OpenAI could not process the request.",
         ),
-        ("NotFoundError", AIInvalidRequestError, "OpenAI could not find the model."),
+        (
+            "NotFoundError",
+            AIUnsupportedModelError,
+            "The selected OpenAI model is unavailable or unsupported.",
+        ),
         (
             "InternalServerError",
             AIProviderServerError,
@@ -580,6 +726,7 @@ __all__ = [
     "DEFAULT_OPENAI_REQUEST_TIMEOUT_SECONDS",
     "DEFAULT_OPENAI_RESPONSE_VERBOSITY",
     "OPENAI_EXPLANATION_RESPONSE_SCHEMA",
+    "OPENAI_CONNECTION_RESPONSE_SCHEMA",
     "OPENAI_PROVIDER_DISPLAY_NAME",
     "OPENAI_PROVIDER_IDENTIFIER",
     "SUPPORTED_OPENAI_MODEL_IDENTIFIERS",

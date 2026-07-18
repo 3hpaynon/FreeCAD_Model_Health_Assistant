@@ -2,6 +2,22 @@ import ast
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from model_health_assistant.ai_connection import AIConnectionTestResult
+from model_health_assistant.ai_models import AIUsageMetadata
+from model_health_assistant.ai_provider import (
+    AIAuthenticationError,
+    AIConnectionError,
+    AIInvalidResponseError,
+    AIMissingCredentialError,
+    AIPermissionError,
+    AIProviderServerError,
+    AIProviderUnavailableError,
+    AIRateLimitError,
+    AIRequestTimeoutError,
+    AIUnsupportedModelError,
+)
 from model_health_assistant.credentials import (
     CredentialBackendStatus,
     ProviderCredentialStore,
@@ -273,6 +289,8 @@ def _controller(
     *,
     secret: str | None = None,
     backend_available: bool = True,
+    connection_provider_factory=None,
+    worker_launcher=None,
 ):
     settings_backend = _MemorySettingsBackend()
     credential_backend = _MemoryCredentialBackend(
@@ -284,6 +302,8 @@ def _controller(
         object(),
         ProviderSettingsStore(settings_backend),
         ProviderCredentialStore(credential_backend),
+        connection_provider_factory=connection_provider_factory,
+        worker_launcher=worker_launcher,
     )
     return controller, settings_backend, credential_backend
 
@@ -298,7 +318,7 @@ def test_dialog_has_required_hidden_empty_key_and_disabled_connection_test() -> 
     assert widgets.api_key_input.tooltip == ""
     assert widgets.test_connection_button.text == "Test Connection"
     assert widgets.test_connection_button.enabled is False
-    assert widgets.test_connection_button.clicked.callbacks == []
+    assert len(widgets.test_connection_button.clicked.callbacks) == 1
     assert widgets.close_button.text == "Close"
     assert widgets.model_combo.items == [
         "gpt-5.6-luna",
@@ -501,7 +521,7 @@ def test_credential_status_mapping_uses_only_approved_messages() -> None:
     ]
 
 
-def test_ui_source_has_no_connection_execution_clipboard_or_eager_pyside_import() -> None:
+def test_ui_source_has_no_clipboard_eager_pyside_or_explanation_execution() -> None:
     source_path = (
         Path(__file__).resolve().parents[1]
         / "src"
@@ -519,8 +539,167 @@ def test_ui_source_has_no_connection_execution_clipboard_or_eager_pyside_import(
 
     assert "PySide" not in top_level_imports
     assert "PySide2" not in top_level_imports
-    assert "retrieve_for_provider_execution" not in source
     assert ".explain(" not in source
     assert "responses.create" not in source
     assert "clipboard" not in source.casefold()
     assert "reveal" not in source.casefold()
+
+
+class _FakeConnectionProvider:
+    def __init__(
+        self,
+        *,
+        available: bool = True,
+        result: AIConnectionTestResult | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        self.available = available
+        self.result = result or AIConnectionTestResult(
+            provider_identifier="openai",
+            provider_display_name="OpenAI",
+            actual_model_identifier="gpt-5.6-terra-test-snapshot",
+            request_identifier="resp_connection_ui_test",
+            usage=AIUsageMetadata(
+                input_tokens=8,
+                output_tokens=3,
+                total_tokens=11,
+            ),
+        )
+        self.error = error
+        self.test_calls = 0
+
+    def is_available(self) -> bool:
+        return self.available
+
+    def test_connection(self) -> AIConnectionTestResult:
+        self.test_calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+class _DeferredLauncher:
+    def __init__(self) -> None:
+        self.operation = None
+        self.success = None
+        self.failure = None
+        self.handle = SimpleNamespace(is_running=True)
+
+    def __call__(self, operation, success, failure):
+        self.operation = operation
+        self.success = success
+        self.failure = failure
+        return self.handle
+
+    def run(self) -> None:
+        try:
+            result = self.operation()
+        except Exception as error:
+            self.handle.is_running = False
+            self.failure(error)
+            return
+        self.handle.is_running = False
+        self.success(result)
+
+
+def test_connection_requires_explicit_confirmation_and_runs_via_worker() -> None:
+    provider = _FakeConnectionProvider()
+    launcher = _DeferredLauncher()
+    controller, _settings_backend, _credential_backend = _controller(
+        secret=_TEST_SECRET,
+        connection_provider_factory=lambda _configuration: provider,
+        worker_launcher=launcher,
+    )
+    widgets = controller.widgets
+    widgets.provider_combo.setCurrentIndex(1)
+    _MessageBox.questions.clear()
+
+    _MessageBox.answer = _MessageBox.No
+    widgets.test_connection_button.clicked.emit()
+    assert provider.test_calls == 0
+    assert launcher.operation is None
+    assert "cancelled" in widgets.operation_status_label.text.casefold()
+
+    _MessageBox.answer = _MessageBox.Yes
+    widgets.test_connection_button.clicked.emit()
+    assert provider.test_calls == 0
+    assert launcher.operation is not None
+    assert "testing" in widgets.operation_status_label.text.casefold()
+    confirmation = str(_MessageBox.questions[-1]).casefold()
+    assert "small provider charge" in confirmation
+    assert "no cad data" in confirmation
+    assert "model-health report" in confirmation
+    assert "document name" in confirmation
+    assert "feature label" in confirmation
+    assert _TEST_SECRET.casefold() not in confirmation
+
+    launcher.run()
+
+    assert provider.test_calls == 1
+    status = widgets.operation_status_label.text
+    assert "Connection successful" in status
+    assert "gpt-5.6-terra-test-snapshot" in status
+    assert "resp_connection_ui_test" in status
+    assert "total 11" in status
+    assert _TEST_SECRET not in status
+
+
+def test_connection_distinguishes_dependency_key_and_provider_failures() -> None:
+    unavailable_provider = _FakeConnectionProvider(available=False)
+    controller, _settings, _credentials = _controller(
+        secret=_TEST_SECRET,
+        connection_provider_factory=lambda _configuration: unavailable_provider,
+        worker_launcher=_DeferredLauncher(),
+    )
+    controller.widgets.provider_combo.setCurrentIndex(1)
+    controller.test_connection()
+    assert controller.widgets.operation_status_label.text == (
+        "OpenAI SDK dependency is unavailable."
+    )
+
+    missing, _settings, _credentials = _controller(
+        connection_provider_factory=lambda _configuration: _FakeConnectionProvider(),
+        worker_launcher=_DeferredLauncher(),
+    )
+    missing.widgets.provider_combo.setCurrentIndex(1)
+    missing.test_connection()
+    assert missing.widgets.operation_status_label.text == (
+        "No secure OpenAI key is configured."
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (AIMissingCredentialError(), "no secure OpenAI key"),
+        (AIAuthenticationError(), "key is invalid"),
+        (AIPermissionError(), "permission was denied"),
+        (AIUnsupportedModelError(), "model is unsupported"),
+        (AIRateLimitError(), "rate limit"),
+        (AIRequestTimeoutError(), "timed out"),
+        (AIConnectionError(), "offline or unreachable"),
+        (AIProviderServerError(), "server failure"),
+        (AIInvalidResponseError(), "invalid structured response"),
+        (AIProviderUnavailableError(), "SDK dependency"),
+    ],
+)
+def test_connection_error_categories_are_safe_and_specific(
+    error: BaseException,
+    expected: str,
+) -> None:
+    provider = _FakeConnectionProvider(error=error)
+    launcher = _DeferredLauncher()
+    controller, _settings, _credentials = _controller(
+        secret=_TEST_SECRET,
+        connection_provider_factory=lambda _configuration: provider,
+        worker_launcher=launcher,
+    )
+    controller.widgets.provider_combo.setCurrentIndex(1)
+    _MessageBox.answer = _MessageBox.Yes
+
+    controller.test_connection()
+    launcher.run()
+
+    status = controller.widgets.operation_status_label.text
+    assert expected in status
+    assert _TEST_SECRET not in status
