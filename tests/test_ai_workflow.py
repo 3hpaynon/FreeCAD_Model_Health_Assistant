@@ -279,6 +279,44 @@ def test_fake_openai_adapter_receives_same_reviewed_request_and_returns_provenan
     assert response.usage.total_tokens == 30
 
 
+def test_prepared_execution_plan_has_no_report_or_settings_work_in_worker() -> None:
+    report = _report()
+    credentials = _CredentialStore()
+    provider = _RecordingProvider()
+    settings_loads = []
+
+    def load_settings() -> ProviderSettings:
+        settings_loads.append("load")
+        return _openai_settings()
+
+    workflow = AIExplanationWorkflow(
+        load_settings,
+        credential_store=credentials,
+        openai_provider_factory=lambda _settings, credential_provider: (
+            setattr(provider, "credential_provider", credential_provider) or provider
+        ),
+    )
+    review = workflow.build_review(report, request_type="full-analysis")
+    consent = AIRequestConsent(review)
+    consent.approve()
+
+    plan = workflow.prepare_execution(consent, report)
+    loads_before_worker = len(settings_loads)
+
+    assert plan.request_type == "full-analysis"
+    assert plan.provider_identifier == "openai"
+    assert plan.request is review.request
+    assert not hasattr(plan, "report")
+    assert not hasattr(plan, "document")
+    assert not hasattr(plan, "settings_loader")
+
+    response = plan.execute()
+
+    assert response.request_identifier == "resp_fake_123"
+    assert len(settings_loads) == loads_before_worker
+    assert provider.requests == [review.request]
+
+
 @pytest.mark.parametrize(
     ("credentials", "available", "code"),
     [

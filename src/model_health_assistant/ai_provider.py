@@ -53,6 +53,22 @@ class AIMissingCredentialError(AIProviderError):
     """Raised when provider execution has no configured secure credential."""
 
 
+class AICredentialBackendUnavailableError(AIProviderUnavailableError):
+    """Raised when an OS credential backend cannot safely retrieve a key."""
+
+
+class AIDependencyMissingError(AIProviderUnavailableError):
+    """Raised when an approved optional provider dependency is unavailable."""
+
+
+class AIRequestCancelledError(AIProviderError):
+    """Raised when a provider request is cancelled before its result is accepted."""
+
+
+class AIUnknownProviderError(AIProviderError):
+    """Raised for a contained provider failure with no safer specific mapping."""
+
+
 class AIPermissionError(AIProviderError):
     """Raised when the provider denies access to a requested resource."""
 
@@ -127,6 +143,8 @@ class AIExplanationProvider(Protocol):
 __all__ = [
     "AIAuthenticationError",
     "AIConnectionError",
+    "AICredentialBackendUnavailableError",
+    "AIDependencyMissingError",
     "AIExplanationProvider",
     "AIInvalidResponseError",
     "AIInvalidRequestError",
@@ -137,8 +155,10 @@ __all__ = [
     "AIProviderServerError",
     "AIProviderUnavailableError",
     "AIRateLimitError",
+    "AIRequestCancelledError",
     "AIRequestRejectedError",
     "AIRequestTimeoutError",
     "AIUnsupportedSDKError",
     "AIUnsupportedModelError",
+    "AIUnknownProviderError",
 ]

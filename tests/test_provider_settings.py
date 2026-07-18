@@ -123,6 +123,18 @@ def test_direct_construction_rejects_invalid_values() -> None:
         ProviderSettings(maximum_output_tokens=1)
     with pytest.raises(ValueError):
         ProviderSettings(provider_identifier="unsupported")
+    with pytest.raises(ValueError, match="reasoning effort"):
+        ProviderSettings(reasoning_effort="minimal")
+
+
+@pytest.mark.parametrize(
+    "reasoning_effort",
+    ["none", "low", "medium", "high", "xhigh", "max"],
+)
+def test_current_reasoning_efforts_are_preserved(reasoning_effort: str) -> None:
+    settings = ProviderSettings(reasoning_effort=reasoning_effort)
+
+    assert settings.reasoning_effort == reasoning_effort
 
 
 def test_settings_schema_has_no_secret_or_runtime_result_fields() -> None:

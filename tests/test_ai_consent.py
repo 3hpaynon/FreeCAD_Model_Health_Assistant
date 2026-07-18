@@ -83,6 +83,7 @@ def test_preview_displays_all_required_metadata_and_exact_request_context() -> N
     assert payload["truncated"] is False
     assert payload["document_name_included"] is False
     assert payload["user_question_included"] is False
+    assert payload["user_question"] is None
     assert payload["provider_request"]["context"] == payload["privacy_safe_context"]
     notices = " ".join(payload["privacy_notices"]).casefold()
     assert "no raw cad file" in notices
@@ -198,6 +199,7 @@ def test_preview_has_no_hidden_fields_or_path_leakage() -> None:
         "truncated",
         "document_name_included",
         "user_question_included",
+        "user_question",
         "privacy_notices",
         "privacy_safe_context",
         "provider_request",

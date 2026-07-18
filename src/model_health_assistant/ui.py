@@ -12,6 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from model_health_assistant.ai_request_state import (
+    AIRequestAlreadyRunningError,
+    AIRequestStateClosedError,
+    AIRequestStateController,
+)
 from model_health_assistant.models import ModelHealthReport
 from model_health_assistant.presentation import (
     AnalysisPresentation,
@@ -118,17 +123,24 @@ class _AIRequestReviewDialogController(_ReadOnlyTextDialogController):
     def cancel(self, *_args: Any) -> None:
         if self.consent is not None:
             self.consent.cancel()
+        self._send_handler = None
+        self.update_text("")
         self.dialog.close()
 
     def send_to_provider(self, *_args: Any) -> bool:
         if self.consent is None or not callable(self._send_handler):
             self.status_label.setText("No reviewed provider request is available.")
             return False
-        self.consent.approve()
-        error = self._send_handler(self.consent)
+        consent = self.consent
+        send_handler = self._send_handler
+        consent.approve()
+        error = send_handler(consent)
         if error:
             self.status_label.setText(str(error))
             return False
+        self.consent = None
+        self._send_handler = None
+        self.update_text("")
         self.dialog.close()
         return True
 
@@ -190,6 +202,9 @@ class _ResultsDialogController:
         explain_selected_warning_handler: Any | None = None,
         explain_full_analysis_button: Any | None = None,
         explain_full_analysis_handler: Any | None = None,
+        ask_about_analysis_button: Any | None = None,
+        ask_about_analysis_handler: Any | None = None,
+        cancel_ai_request_button: Any | None = None,
         ai_workflow_status_handler: Any | None = None,
     ) -> None:
         self.dialog = dialog
@@ -216,7 +231,12 @@ class _ResultsDialogController:
         self.explain_selected_warning_handler = explain_selected_warning_handler
         self.explain_full_analysis_button = explain_full_analysis_button
         self.explain_full_analysis_handler = explain_full_analysis_handler
+        self.ask_about_analysis_button = ask_about_analysis_button
+        self.ask_about_analysis_handler = ask_about_analysis_handler
+        self.cancel_ai_request_button = cancel_ai_request_button
         self.ai_workflow_status_handler = ai_workflow_status_handler
+        self._ai_request_state = AIRequestStateController()
+        self._active_ai_ticket: int | None = None
         self._ai_operation_running = False
         self._ai_operation = None
         self.warning_items: tuple[WarningDisplayItem, ...] = ()
@@ -534,23 +554,166 @@ class _ResultsDialogController:
         )
         return True
 
-    def begin_ai_operation(self, message: str) -> bool:
+    def ask_about_analysis(self, *_args: Any) -> bool:
+        """Collect one question and open its exact privacy review."""
+
+        status = self._ai_workflow_status()
+        if self.report is None:
+            self._refresh_ai_action_state()
+            self.update_status(
+                "Grounded questions are unavailable: no completed report exists."
+            )
+            return False
+        if status is None or not getattr(status, "available", False):
+            self._refresh_ai_action_state()
+            message = getattr(
+                status,
+                "message",
+                "The selected provider is unavailable.",
+            )
+            self.update_status(f"Grounded questions are unavailable: {message}")
+            return False
+        if self._ai_operation_running:
+            self.update_status("An explanation request is already running.")
+            return False
+        if not callable(self.ask_about_analysis_handler):
+            self._refresh_ai_action_state()
+            self.update_status(
+                "Grounded questions are unavailable in this Qt runtime."
+            )
+            return False
+        try:
+            error = self.ask_about_analysis_handler(self)
+        except Exception as exc:
+            error = f"Could not prepare the question safely: {type(exc).__name__}: {exc}"
+        if error:
+            self.update_status(f"Grounded question failed: {error}")
+            return False
+        self.update_status(
+            "Opened final review for one grounded question. No data was transmitted."
+        )
+        return True
+
+    @property
+    def active_ai_ticket(self) -> int | None:
+        """Return the ticket for the request currently accepted by this dialog."""
+
+        return self._active_ai_ticket
+
+    def begin_ai_operation(
+        self,
+        message: str,
+        *,
+        request_type: str = "explanation",
+        provider_identifier: str = "selected-provider",
+    ) -> bool:
         """Mark one provider request active and disable competing AI actions."""
 
-        if self._ai_operation_running:
+        try:
+            ticket = self._ai_request_state.begin(
+                request_type,
+                provider_identifier,
+                progress_message=message,
+            )
+        except (AIRequestAlreadyRunningError, AIRequestStateClosedError):
             return False
+        self._active_ai_ticket = ticket
         self._ai_operation_running = True
+        self._refresh_ai_action_state()
+        self.update_status(
+            f"{message} Request: {request_type}; provider: {provider_identifier}."
+        )
+        return True
+
+    def attach_ai_operation(self, ticket: object, operation: object) -> bool:
+        """Retain a worker handle only while its ticket is still current."""
+
+        if not self.is_ai_operation_current(ticket):
+            detach = getattr(operation, "detach", None)
+            if callable(detach):
+                detach()
+            return False
+        self._ai_operation = operation
+        return True
+
+    def is_ai_operation_current(self, ticket: object) -> bool:
+        """Return whether a callback ticket still owns this dialog's UI state."""
+
+        snapshot = self._ai_request_state.snapshot
+        return (
+            snapshot.accepts_callbacks
+            and type(ticket) is int
+            and ticket == snapshot.ticket
+        )
+
+    def complete_ai_operation(
+        self,
+        message: str,
+        *,
+        ticket: object | None = None,
+        failed: bool = False,
+    ) -> bool:
+        """Return the explanation actions to their request-time readiness state."""
+
+        effective_ticket = self._active_ai_ticket if ticket is None else ticket
+        accept = (
+            self._ai_request_state.accept_failure
+            if failed
+            else self._ai_request_state.accept_success
+        )
+        if not accept(effective_ticket, progress_message=message):
+            return False
+        self._ai_operation_running = False
+        self._ai_operation = None
+        self._active_ai_ticket = None
         self._refresh_ai_action_state()
         self.update_status(message)
         return True
 
-    def complete_ai_operation(self, message: str) -> None:
-        """Return the explanation actions to their request-time readiness state."""
+    def cancel_ai_operation(self, *_args: Any) -> bool:
+        """Logically cancel one request and suppress all of its late callbacks."""
 
-        self._ai_operation_running = False
+        ticket = self._active_ai_ticket
+        if ticket is None or not self._ai_request_state.cancel(
+            ticket,
+            progress_message="Request cancelled.",
+        ):
+            return False
+        cancel = getattr(self._ai_operation, "cancel", None)
+        if callable(cancel):
+            cancel()
         self._ai_operation = None
+        self._active_ai_ticket = None
+        self._ai_operation_running = False
         self._refresh_ai_action_state()
-        self.update_status(message)
+        self.update_status(
+            "Request cancelled. A provider operation already in progress may finish "
+            "in the background, but its result will not be displayed."
+        )
+        return True
+
+    def detach_ai_operation(self, *_args: Any) -> None:
+        """Detach a hidden dialog without terminating an in-flight worker."""
+
+        self._ai_request_state.detach(progress_message="Dialog detached.")
+        detach = getattr(self._ai_operation, "detach", None)
+        if callable(detach):
+            detach()
+        self._ai_operation = None
+        self._active_ai_ticket = None
+        self._ai_operation_running = False
+        self._refresh_ai_action_state()
+
+    def close_ai_request_state(self) -> None:
+        """Permanently reject callbacks once the underlying dialog is destroyed."""
+
+        detach = getattr(self._ai_operation, "detach", None)
+        if callable(detach):
+            detach()
+        self._ai_request_state.close(progress_message="Dialog destroyed.")
+        self._ai_operation = None
+        self._active_ai_ticket = None
+        self._ai_operation_running = False
 
     def current_selected_warning(self) -> WarningDisplayItem | None:
         """Return the current table selection for consent revalidation."""
@@ -685,6 +848,11 @@ class _ResultsDialogController:
                 tool_tip = getattr(status, "message", "Provider unavailable.")
             set_tool_tip(tool_tip)
 
+        cancel_button = self.cancel_ai_request_button
+        set_enabled = getattr(cancel_button, "setEnabled", None)
+        if callable(set_enabled):
+            set_enabled(self._ai_operation_running)
+
         full_enabled = (
             self.report is not None
             and not self._ai_operation_running
@@ -696,6 +864,26 @@ class _ResultsDialogController:
         if callable(set_enabled):
             set_enabled(full_enabled)
         set_tool_tip = getattr(full_button, "setToolTip", None)
+        if callable(set_tool_tip):
+            if self._ai_operation_running:
+                tool_tip = "An explanation request is already running."
+            elif self.report is None:
+                tool_tip = "Run an analysis first."
+            else:
+                tool_tip = getattr(status, "message", "Provider unavailable.")
+            set_tool_tip(tool_tip)
+
+        question_enabled = (
+            self.report is not None
+            and not self._ai_operation_running
+            and ready
+            and callable(self.ask_about_analysis_handler)
+        )
+        question_button = self.ask_about_analysis_button
+        set_enabled = getattr(question_button, "setEnabled", None)
+        if callable(set_enabled):
+            set_enabled(question_enabled)
+        set_tool_tip = getattr(question_button, "setToolTip", None)
         if callable(set_tool_tip):
             if self._ai_operation_running:
                 tool_tip = "An explanation request is already running."
@@ -1089,6 +1277,19 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
         dialog,
     )
     explain_full_analysis_button.setEnabled(False)
+    ask_about_analysis_button = qt_widgets.QPushButton(
+        "Ask About This Analysis",
+        dialog,
+    )
+    ask_about_analysis_button.setEnabled(False)
+    cancel_ai_request_button = qt_widgets.QPushButton(
+        "Cancel Request",
+        dialog,
+    )
+    cancel_ai_request_button.setEnabled(False)
+    cancel_ai_request_button.setToolTip(
+        "Logically cancel the active provider request without terminating its thread."
+    )
     select_feature_button = qt_widgets.QPushButton("Select Feature", dialog)
     select_feature_button.setEnabled(False)
     button_layout.addWidget(select_feature_button)
@@ -1098,6 +1299,8 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     button_layout.addWidget(test_mock_explanation_button)
     button_layout.addWidget(explain_selected_warning_button)
     button_layout.addWidget(explain_full_analysis_button)
+    button_layout.addWidget(ask_about_analysis_button)
+    button_layout.addWidget(cancel_ai_request_button)
     button_layout.addWidget(refresh_analysis_button)
     button_layout.addStretch()
     close_button = qt_widgets.QPushButton("Close", dialog)
@@ -1183,6 +1386,16 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
                 qt_core,
             )
         ),
+        ask_about_analysis_button=ask_about_analysis_button,
+        ask_about_analysis_handler=lambda active_controller: (
+            _start_custom_question_review(
+                active_controller,
+                qt_widgets,
+                dialog,
+                qt_core,
+            )
+        ),
+        cancel_ai_request_button=cancel_ai_request_button,
         ai_workflow_status_handler=lambda active_controller: (
             _ai_workflow_status_for_controller(active_controller)
         ),
@@ -1197,7 +1410,12 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
         controller.explain_selected_warning
     )
     explain_full_analysis_button.clicked.connect(controller.explain_full_analysis)
+    ask_about_analysis_button.clicked.connect(controller.ask_about_analysis)
+    cancel_ai_request_button.clicked.connect(controller.cancel_ai_operation)
     refresh_analysis_button.clicked.connect(controller.refresh_analysis)
+    finished_signal = getattr(dialog, "finished", None)
+    if finished_signal is not None and hasattr(finished_signal, "connect"):
+        finished_signal.connect(controller.detach_ai_operation)
     destroyed_signal = getattr(dialog, "destroyed", None)
     if destroyed_signal is not None and hasattr(destroyed_signal, "connect"):
         destroyed_signal.connect(
@@ -1412,38 +1630,34 @@ def _start_selected_warning_review(
         )
         if validation_error:
             return validation_error
-        if not controller.begin_ai_operation(
-            "Request in progress. The model remains read-only."
-        ):
+        if controller._ai_operation_running:
             return "Another explanation request is already running."
-
-        from model_health_assistant.qt_async import start_qt_background_operation
-
         try:
-            controller._ai_operation = start_qt_background_operation(
-                qt_core,
-                parent,
-                lambda: workflow.execute_review(
-                    consent,
-                    current_report,
-                    selected_warning_identifier=current_warning.warning_id,
-                ),
-                lambda response: _selected_explanation_succeeded(
+            plan = workflow.prepare_execution(
+                consent,
+                current_report,
+                selected_warning_identifier=current_warning.warning_id,
+            )
+        except Exception as exc:
+            return _explanation_error_text(exc)
+        return _launch_prepared_ai_execution(
+            controller,
+            plan,
+            qt_core,
+            parent,
+            progress_message="Request in progress. The model remains read-only.",
+            on_success=lambda response, ticket: (
+                _selected_explanation_succeeded(
                     controller,
                     response,
                     current_warning,
                     review,
                     qt_widgets,
                     parent,
-                ),
-                lambda error: _explanation_failed(controller, error),
-            )
-        except Exception as exc:
-            controller.complete_ai_operation(
-                "Explanation failed: " + _explanation_error_text(exc)
-            )
-            return _explanation_error_text(exc)
-        return None
+                    ticket=ticket,
+                )
+            ),
+        )
 
     global _ai_context_preview_dialog
     if _ai_context_preview_dialog is None:
@@ -1504,34 +1718,31 @@ def _start_full_analysis_review(
         current_report = controller.report
         if current_report is None:
             return "The completed report changed; review a fresh request."
-        if not controller.begin_ai_operation(
-            "Full-analysis request in progress. The model remains read-only."
-        ):
+        if controller._ai_operation_running:
             return "Another explanation request is already running."
-
-        from model_health_assistant.qt_async import start_qt_background_operation
-
         try:
-            controller._ai_operation = start_qt_background_operation(
-                qt_core,
-                parent,
-                lambda: workflow.execute_review(consent, current_report),
-                lambda response: _full_explanation_succeeded(
+            plan = workflow.prepare_execution(consent, current_report)
+        except Exception as exc:
+            return _explanation_error_text(exc)
+        return _launch_prepared_ai_execution(
+            controller,
+            plan,
+            qt_core,
+            parent,
+            progress_message=(
+                "Full-analysis request in progress. The model remains read-only."
+            ),
+            on_success=lambda response, ticket: (
+                _full_explanation_succeeded(
                     controller,
                     response,
                     review,
                     qt_widgets,
                     parent,
-                ),
-                lambda error: _explanation_failed(controller, error),
-            )
-        except Exception as exc:
-            controller.complete_ai_operation(
-                "Full-analysis explanation failed: "
-                + _explanation_error_text(exc)
-            )
-            return _explanation_error_text(exc)
-        return None
+                    ticket=ticket,
+                )
+            ),
+        )
 
     global _ai_context_preview_dialog
     if _ai_context_preview_dialog is None:
@@ -1547,6 +1758,161 @@ def _start_full_analysis_review(
     return None
 
 
+def _start_custom_question_review(
+    controller: _ResultsDialogController,
+    qt_widgets: Any,
+    parent: Any,
+    qt_core: Any | None,
+) -> str | None:
+    """Collect one ephemeral question and show its exact consent review."""
+
+    report = controller.report
+    if report is None:
+        return "Run an analysis before asking a grounded question."
+    if qt_core is None:
+        return "Background provider execution is unavailable in this Qt runtime."
+
+    question, question_error = _prompt_for_grounded_question(qt_widgets, parent)
+    if question_error is not None:
+        return question_error
+    try:
+        workflow = _build_ai_explanation_workflow(controller)
+        review = workflow.build_review(
+            report,
+            request_type="custom-question",
+            user_question=question,
+        )
+    except Exception as exc:
+        return _explanation_error_text(exc)
+
+    def send_handler(consent: Any) -> str | None:
+        current_report = controller.report
+        if current_report is None:
+            return "The completed report changed; review a fresh question."
+        if controller._ai_operation_running:
+            return "Another explanation request is already running."
+        try:
+            plan = workflow.prepare_execution(consent, current_report)
+        except Exception as exc:
+            return _explanation_error_text(exc)
+        return _launch_prepared_ai_execution(
+            controller,
+            plan,
+            qt_core,
+            parent,
+            progress_message=(
+                "Grounded-question request in progress. The model remains read-only."
+            ),
+            on_success=lambda response, ticket: (
+                _custom_question_succeeded(
+                    controller,
+                    response,
+                    review,
+                    qt_widgets,
+                    parent,
+                    ticket=ticket,
+                )
+            ),
+        )
+
+    global _ai_context_preview_dialog
+    if _ai_context_preview_dialog is None:
+        _ai_context_preview_dialog = _create_ai_context_preview_dialog(
+            qt_widgets,
+            parent,
+        )
+    _ai_context_preview_dialog.dialog.setWindowTitle(
+        "Final Review - Ask About This Analysis"
+    )
+    _ai_context_preview_dialog.update_review(review, send_handler)
+    _ai_context_preview_dialog.show()
+    return None
+
+
+def _prompt_for_grounded_question(
+    qt_widgets: Any,
+    parent: Any,
+) -> tuple[str | None, str | None]:
+    """Return one unpersisted question from Qt's standard multiline dialog."""
+
+    from model_health_assistant.ai_prompts import MAX_GROUNDED_QUESTION_CHARACTERS
+
+    input_dialog = getattr(qt_widgets, "QInputDialog", None)
+    get_multiline_text = getattr(input_dialog, "getMultiLineText", None)
+    if not callable(get_multiline_text):
+        return None, "Question entry is unavailable in this Qt runtime."
+    result = get_multiline_text(
+        parent,
+        "Ask About This Analysis",
+        (
+            "Ask one question grounded only in the current model-health analysis "
+            f"(maximum {MAX_GROUNDED_QUESTION_CHARACTERS} characters):"
+        ),
+        "",
+    )
+    if not isinstance(result, tuple) or len(result) < 2:
+        return None, "Question entry failed safely."
+    question, accepted = result[0], result[1]
+    if not accepted:
+        return None, "Question entry was cancelled. No data was transmitted."
+    if not isinstance(question, str):
+        return None, "Question entry returned invalid text."
+    return question, None
+
+
+def _launch_prepared_ai_execution(
+    controller: _ResultsDialogController,
+    plan: Any,
+    qt_core: Any,
+    parent: Any,
+    *,
+    progress_message: str,
+    on_success: Any,
+) -> str | None:
+    """Start one prevalidated plan and ticket-gate every UI callback."""
+
+    if not controller.begin_ai_operation(
+        progress_message,
+        request_type=plan.request_type,
+        provider_identifier=plan.provider_identifier,
+    ):
+        return "Another explanation request is already running."
+    ticket = controller.active_ai_ticket
+    if ticket is None:
+        return "The explanation request could not acquire a UI request ticket."
+
+    from model_health_assistant.qt_async import start_qt_background_operation
+
+    try:
+        operation = start_qt_background_operation(
+            qt_core,
+            parent,
+            plan.execute,
+            lambda response: (
+                on_success(response, ticket)
+                if controller.is_ai_operation_current(ticket)
+                else None
+            ),
+            lambda error: _explanation_failed(
+                controller,
+                error,
+                ticket=ticket,
+                request_type=plan.request_type,
+                provider_identifier=plan.provider_identifier,
+                model_identifier=getattr(plan, "model_identifier", None),
+            ),
+        )
+    except Exception as exc:
+        controller.complete_ai_operation(
+            "Explanation failed: " + _explanation_error_text(exc),
+            ticket=ticket,
+            failed=True,
+        )
+        return _explanation_error_text(exc)
+    controller.attach_ai_operation(ticket, operation)
+    return None
+
+
 def _selected_explanation_succeeded(
     controller: _ResultsDialogController,
     response: Any,
@@ -1554,6 +1920,8 @@ def _selected_explanation_succeeded(
     review: Any,
     qt_widgets: Any,
     parent: Any,
+    *,
+    ticket: object | None = None,
 ) -> None:
     from model_health_assistant.ai_result_presentation import (
         format_selected_warning_explanation,
@@ -1566,17 +1934,26 @@ def _selected_explanation_succeeded(
             review,
         )
     except Exception as exc:
-        _explanation_failed(controller, exc)
+        _explanation_failed(
+            controller,
+            exc,
+            ticket=ticket,
+            request_type=review.request_type,
+            provider_identifier=review.provider_identifier,
+            model_identifier=review.model_identifier,
+        )
+        return
+    if not controller.complete_ai_operation(
+        "Explanation completed. The original warning and advisory AI text are "
+        "shown separately; no model changes were made.",
+        ticket=ticket,
+    ):
         return
     _show_ai_explanation_text(
         text,
         "Selected Warning AI Explanation",
         qt_widgets,
         parent,
-    )
-    controller.complete_ai_operation(
-        "Explanation completed. The original warning and advisory AI text are "
-        "shown separately; no model changes were made."
     )
 
 
@@ -1586,6 +1963,8 @@ def _full_explanation_succeeded(
     review: Any,
     qt_widgets: Any,
     parent: Any,
+    *,
+    ticket: object | None = None,
 ) -> None:
     from model_health_assistant.ai_result_presentation import (
         format_full_analysis_explanation,
@@ -1594,7 +1973,20 @@ def _full_explanation_succeeded(
     try:
         text = format_full_analysis_explanation(response, review)
     except Exception as exc:
-        _explanation_failed(controller, exc)
+        _explanation_failed(
+            controller,
+            exc,
+            ticket=ticket,
+            request_type=review.request_type,
+            provider_identifier=review.provider_identifier,
+            model_identifier=review.model_identifier,
+        )
+        return
+    if not controller.complete_ai_operation(
+        "Full-analysis explanation completed. The advisory response is read-only; "
+        "no model changes were made.",
+        ticket=ticket,
+    ):
         return
     _show_ai_explanation_text(
         text,
@@ -1602,68 +1994,90 @@ def _full_explanation_succeeded(
         qt_widgets,
         parent,
     )
-    controller.complete_ai_operation(
-        "Full-analysis explanation completed. The advisory response is read-only; "
-        "no model changes were made."
+
+
+def _custom_question_succeeded(
+    controller: _ResultsDialogController,
+    response: Any,
+    review: Any,
+    qt_widgets: Any,
+    parent: Any,
+    *,
+    ticket: object | None = None,
+) -> None:
+    from model_health_assistant.ai_result_presentation import (
+        format_grounded_question_response,
+    )
+
+    try:
+        text = format_grounded_question_response(response, review)
+    except Exception as exc:
+        _explanation_failed(
+            controller,
+            exc,
+            ticket=ticket,
+            request_type=review.request_type,
+            provider_identifier=review.provider_identifier,
+            model_identifier=review.model_identifier,
+        )
+        return
+    if not controller.complete_ai_operation(
+        "Grounded answer completed. It is one-shot advisory text based only on "
+        "the reviewed context; no model changes were made.",
+        ticket=ticket,
+    ):
+        return
+    _show_ai_explanation_text(
+        text,
+        "Ask About This Analysis - Grounded AI Answer",
+        qt_widgets,
+        parent,
     )
 
 
 def _explanation_failed(
     controller: _ResultsDialogController,
     error: BaseException,
+    *,
+    ticket: object | None = None,
+    request_type: str | None = None,
+    provider_identifier: str | None = None,
+    model_identifier: str | None = None,
 ) -> None:
-    controller.complete_ai_operation(
-        "Explanation failed: " + _explanation_error_text(error)
+    accepted = controller.complete_ai_operation(
+        "Explanation failed: " + _explanation_error_text(error),
+        ticket=ticket,
+        failed=True,
     )
+    if not accepted:
+        return
+    from model_health_assistant.ai_error_handling import (
+        format_redacted_ai_diagnostic,
+    )
+
+    diagnostic = format_redacted_ai_diagnostic(
+        error,
+        request_type=request_type,
+        provider_identifier=provider_identifier,
+        model_identifier=model_identifier,
+    )
+    app_module = (
+        controller.document_context.app_module
+        if controller.document_context is not None
+        else App
+    )
+    _print_message(f"Model Health Assistant: {diagnostic}\n", app_module)
 
 
 def _explanation_error_text(error: BaseException) -> str:
     """Map workflow/provider failures to concise messages without secret data."""
 
     from model_health_assistant.ai_consent import AIConsentError
-    from model_health_assistant.ai_provider import (
-        AIAuthenticationError,
-        AIConnectionError,
-        AIInvalidRequestError,
-        AIInvalidResponseError,
-        AIMissingCredentialError,
-        AIPermissionError,
-        AIProviderRefusalError,
-        AIProviderServerError,
-        AIProviderUnavailableError,
-        AIRateLimitError,
-        AIRequestTimeoutError,
-        AIUnsupportedModelError,
-    )
-    from model_health_assistant.ai_workflow import AIWorkflowUnavailableError
+    from model_health_assistant.ai_error_handling import categorize_ai_error
 
     if isinstance(error, AIConsentError):
         return str(error)
-    if isinstance(error, AIMissingCredentialError):
-        return "No provider API key is configured in secure storage."
-    if isinstance(error, AIAuthenticationError):
-        return "The provider rejected the configured API key."
-    if isinstance(error, AIPermissionError):
-        return "The configured account is not permitted to make this request."
-    if isinstance(error, AIUnsupportedModelError):
-        return "The selected model is not supported by the provider account."
-    if isinstance(error, AIRateLimitError):
-        return "The provider rate limit was reached. Try again later."
-    if isinstance(error, AIRequestTimeoutError):
-        return "The provider request timed out without a usable result."
-    if isinstance(error, AIConnectionError):
-        return "The provider could not be reached. Check the network connection."
-    if isinstance(error, AIProviderServerError):
-        return "The provider reported a temporary server error."
-    if isinstance(error, AIProviderRefusalError):
-        return "The provider refused the explanation request; no explanation was shown."
-    if isinstance(error, AIInvalidResponseError):
-        return "The provider returned invalid structured output; it was not shown."
-    if isinstance(error, AIInvalidRequestError):
-        return "The provider rejected the structured explanation request."
-    if isinstance(error, (AIWorkflowUnavailableError, AIProviderUnavailableError)):
-        return str(error)
-    return f"The explanation failed safely ({type(error).__name__})."
+    return categorize_ai_error(error).user_message
 
 
 def _show_ai_explanation_text(
@@ -2184,6 +2598,9 @@ def _format_evidence(evidence: dict[str, Any] | None) -> str:
 
 
 def _clear_results_dialog(controller: _ResultsDialogController) -> None:
+    close_request_state = getattr(controller, "close_ai_request_state", None)
+    if callable(close_request_state):
+        close_request_state()
     global _results_dialog
     if _results_dialog is controller:
         _results_dialog = None

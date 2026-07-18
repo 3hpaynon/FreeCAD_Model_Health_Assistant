@@ -90,10 +90,12 @@ def test_selected_warning_result_separates_source_and_advisory_with_provenance()
     assert "The source warning message." in text[:ai_index]
     assert "Advisory explanation." in text[ai_index:]
     assert "Provider: OpenAI (openai)" in text
-    assert "Requested model: gpt-5.6-terra" in text
+    assert "Configured model: gpt-5.6-terra" in text
     assert "Actual model: gpt-5.6-terra-2026-06-01" in text
+    assert "configured and actual model identifiers differ" in text
     assert "Request ID: resp_123" in text
-    assert "Usage: input=100, output=50, total=150, reasoning=20" in text
+    assert "Usage: input=100, output=50, total=150" in text
+    assert "reasoning=20" not in text
     assert "Warning-specific limitation." in text
     assert "Overall limitation." in text
     assert AI_ADVISORY_DISCLAIMER in text

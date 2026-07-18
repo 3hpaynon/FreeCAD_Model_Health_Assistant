@@ -85,7 +85,13 @@ class LocalMockAIProvider:
             self._explain_warning(warning) for warning in request.context.warnings
         ]
         warning_count = len(warning_explanations)
-        if warning_count == 0:
+        if request.user_question is not None:
+            overall_summary = (
+                "The deterministic local mock provider cannot independently answer "
+                "the grounded question. Review the supplied rule-based warnings and "
+                "analysis limitations manually; no AI inference was performed."
+            )
+        elif warning_count == 0:
             overall_summary = (
                 "The deterministic local mock provider received no existing "
                 "model-health warnings to explain. No AI model was used."
@@ -106,6 +112,14 @@ class LocalMockAIProvider:
             ),
             "All review steps are advisory and require manual engineering judgment.",
         ]
+        if request.user_question is not None:
+            limitations.insert(
+                0,
+                (
+                    "The local mock validates the one-shot grounded-question workflow "
+                    "but does not infer an answer or use prior conversation state."
+                ),
+            )
         context_metadata = request.context.metadata
         if context_metadata.was_truncated:
             omitted_warning_phrase = (

@@ -1,6 +1,7 @@
 import ast
 import json
 import traceback
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -11,10 +12,16 @@ from model_health_assistant.ai_models import (
     AIRequestContext,
     AIWarningContext,
 )
+from model_health_assistant.ai_model_capabilities import (
+    get_openai_model_capabilities,
+    resolve_model_options,
+)
 from model_health_assistant.ai_prompts import build_ai_explanation_request
 from model_health_assistant.ai_provider import (
     AIAuthenticationError,
     AIConnectionError,
+    AICredentialBackendUnavailableError,
+    AIDependencyMissingError,
     AIInvalidRequestError,
     AIInvalidResponseError,
     AIMissingCredentialError,
@@ -31,7 +38,10 @@ from model_health_assistant.openai_provider import (
     DEFAULT_OPENAI_MODEL_IDENTIFIER,
     OPENAI_EXPLANATION_RESPONSE_SCHEMA,
     OPENAI_CONNECTION_RESPONSE_SCHEMA,
+    OPENAI_NON_RETRYABLE_FAILURES,
     OPENAI_PROVIDER_IDENTIFIER,
+    OPENAI_RETRYABLE_FAILURES,
+    OPENAI_RETRY_POLICY_OWNER,
     OpenAIExplanationProvider,
     OpenAIProviderConfiguration,
 )
@@ -334,6 +344,129 @@ def test_sdk_errors_map_to_provider_neutral_errors(
     assert _TEST_CREDENTIAL not in rendered_traceback
     assert captured.value.__cause__ is None
     assert captured.value.__context__ is None
+    assert len(responses.calls) == 1
+
+
+def test_retry_policy_is_sdk_owned_bounded_and_excludes_auth_and_permission() -> None:
+    assert OPENAI_RETRY_POLICY_OWNER == "openai-sdk"
+    assert "authentication" in OPENAI_NON_RETRYABLE_FAILURES
+    assert "permission" in OPENAI_NON_RETRYABLE_FAILURES
+    assert "connection_error" in OPENAI_RETRYABLE_FAILURES
+    assert "rate_limit" in OPENAI_RETRYABLE_FAILURES
+    assert "provider_server_error" in OPENAI_RETRYABLE_FAILURES
+    assert OpenAIProviderConfiguration(maximum_retries=0).maximum_retries == 0
+    assert OpenAIProviderConfiguration(maximum_retries=5).maximum_retries == 5
+    with pytest.raises(ValueError, match="maximum retries"):
+        OpenAIProviderConfiguration(maximum_retries=6)
+
+
+def test_configuration_rejects_empty_malformed_and_unsupported_models_exactly() -> None:
+    with pytest.raises(AIInvalidRequestError, match="nonempty model"):
+        OpenAIProviderConfiguration(model_identifier="")
+    with pytest.raises(AIInvalidRequestError, match="malformed"):
+        OpenAIProviderConfiguration(model_identifier="bad/model")
+    with pytest.raises(AIUnsupportedModelError, match="user-selected-model"):
+        OpenAIProviderConfiguration(model_identifier="user-selected-model")
+
+
+def test_omitted_model_controls_use_registered_safe_defaults() -> None:
+    configuration = OpenAIProviderConfiguration(
+        model_identifier="gpt-5.6-luna",
+        reasoning_effort=None,
+        response_verbosity=None,
+    )
+
+    assert configuration.model_identifier == "gpt-5.6-luna"
+    assert configuration.reasoning_effort == "low"
+    assert configuration.response_verbosity == "medium"
+
+
+def test_request_builder_omits_options_not_supported_by_capabilities() -> None:
+    capabilities = replace(
+        get_openai_model_capabilities("gpt-5.6-terra"),
+        reasoning_efforts=frozenset(),
+        default_reasoning_effort=None,
+        response_verbosities=frozenset(),
+        default_response_verbosity=None,
+        output_token_limit_parameter=None,
+        maximum_output_tokens=None,
+        supports_request_metadata=False,
+    )
+    resolved = resolve_model_options(
+        capabilities,
+        reasoning_effort=None,
+        response_verbosity=None,
+        maximum_output_tokens=1_200,
+    )
+    configuration = OpenAIProviderConfiguration()
+    object.__setattr__(configuration, "resolved_options", resolved)
+    provider = OpenAIExplanationProvider(
+        lambda: _TEST_CREDENTIAL,
+        configuration=configuration,
+    )
+
+    arguments = provider._request_arguments(_request())
+
+    assert "reasoning" not in arguments
+    assert "metadata" not in arguments
+    assert "max_output_tokens" not in arguments
+    assert set(arguments["text"]) == {"format"}
+
+
+def test_request_builder_uses_capability_specific_output_limit_parameter() -> None:
+    capabilities = replace(
+        get_openai_model_capabilities("gpt-5.6-terra"),
+        output_token_limit_parameter="max_completion_tokens",
+    )
+    resolved = resolve_model_options(
+        capabilities,
+        reasoning_effort="low",
+        response_verbosity="medium",
+        maximum_output_tokens=777,
+    )
+    configuration = OpenAIProviderConfiguration()
+    object.__setattr__(configuration, "resolved_options", resolved)
+    provider = OpenAIExplanationProvider(
+        lambda: _TEST_CREDENTIAL,
+        configuration=configuration,
+    )
+
+    arguments = provider._request_arguments(_request())
+
+    assert arguments["max_completion_tokens"] == 777
+    assert "max_output_tokens" not in arguments
+
+
+def test_connection_builder_also_omits_unsupported_optional_controls() -> None:
+    capabilities = replace(
+        get_openai_model_capabilities("gpt-5.6-terra"),
+        reasoning_efforts=frozenset(),
+        default_reasoning_effort=None,
+        response_verbosities=frozenset(),
+        default_response_verbosity=None,
+        output_token_limit_parameter=None,
+        maximum_output_tokens=None,
+        supports_request_metadata=False,
+    )
+    resolved = resolve_model_options(
+        capabilities,
+        reasoning_effort=None,
+        response_verbosity=None,
+        maximum_output_tokens=1_200,
+    )
+    configuration = OpenAIProviderConfiguration()
+    object.__setattr__(configuration, "resolved_options", resolved)
+    provider = OpenAIExplanationProvider(
+        lambda: _TEST_CREDENTIAL,
+        configuration=configuration,
+    )
+
+    arguments = provider._connection_request_arguments()
+
+    assert "reasoning" not in arguments
+    assert "metadata" not in arguments
+    assert "max_output_tokens" not in arguments
+    assert set(arguments["text"]) == {"format"}
 
 
 def test_malformed_json_is_rejected_without_echoing_raw_output() -> None:
@@ -373,6 +506,28 @@ def test_missing_or_invalid_credential_fails_before_sdk_or_client(
         provider.explain(_request())
 
     assert calls == []
+
+
+def test_credential_backend_and_dependency_failures_remain_distinct() -> None:
+    from model_health_assistant.credentials import (
+        CredentialBackendUnavailableError,
+    )
+
+    backend_provider = OpenAIExplanationProvider(
+        lambda: (_ for _ in ()).throw(CredentialBackendUnavailableError("private")),
+        module_importer=lambda _name: _sdk_module(),
+        dependency_path_activator=lambda: None,
+    )
+    with pytest.raises(AICredentialBackendUnavailableError):
+        backend_provider.explain(_request())
+
+    dependency_provider = OpenAIExplanationProvider(
+        lambda: _TEST_CREDENTIAL,
+        module_importer=lambda name: (_ for _ in ()).throw(ModuleNotFoundError(name)),
+        dependency_path_activator=lambda: None,
+    )
+    with pytest.raises(AIDependencyMissingError):
+        dependency_provider.explain(_request())
 
 
 def test_unsupported_sdk_and_missing_sdk_are_controlled() -> None:

@@ -8,7 +8,7 @@ builds an exact consent review, and executes only the consumed request.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from model_health_assistant.ai_consent import (
@@ -18,8 +18,18 @@ from model_health_assistant.ai_consent import (
     AIRequestType,
     build_ai_request_review,
 )
-from model_health_assistant.ai_models import AIExplanationResponse
-from model_health_assistant.ai_provider import AIExplanationProvider
+from model_health_assistant.ai_models import (
+    AIExplanationRequest,
+    AIExplanationResponse,
+)
+from model_health_assistant.ai_model_capabilities import (
+    get_openai_model_capabilities,
+)
+from model_health_assistant.ai_provider import (
+    AIExplanationProvider,
+    AIInvalidRequestError,
+    AIUnsupportedModelError,
+)
 from model_health_assistant.ai_service import AIExplanationService
 from model_health_assistant.mock_ai_provider import (
     LOCAL_MOCK_PROVIDER_DISPLAY_NAME,
@@ -32,7 +42,6 @@ from model_health_assistant.openai_provider import (
     DEFAULT_OPENAI_RESPONSE_VERBOSITY,
     OPENAI_PROVIDER_DISPLAY_NAME,
     OPENAI_PROVIDER_IDENTIFIER,
-    SUPPORTED_OPENAI_MODEL_IDENTIFIERS,
     OpenAIExplanationProvider,
     OpenAIProviderConfiguration,
 )
@@ -43,6 +52,10 @@ LOCAL_MOCK_MODEL_IDENTIFIER = "deterministic-local-v1"
 
 class AIWorkflowUnavailableError(RuntimeError):
     """Raised when the selected provider is not ready for an explanation."""
+
+    def __init__(self, message: str, *, status_code: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +68,27 @@ class AIWorkflowStatus:
     available: bool
     status_code: str
     message: str
+
+
+@dataclass(frozen=True, slots=True)
+class AIExecutionPlan:
+    """Request-time provider snapshot safe to execute outside the GUI thread.
+
+    The plan contains no FreeCAD document, Qt widget, settings adapter, report
+    path, or raw report.  Consent is consumed before this object is created, so
+    worker execution performs only provider-neutral request execution.
+    """
+
+    request_type: AIRequestType
+    provider_identifier: str
+    model_identifier: str
+    request: AIExplanationRequest = field(repr=False)
+    provider: AIExplanationProvider = field(repr=False)
+
+    def execute(self) -> AIExplanationResponse:
+        """Execute and validate this already-reviewed provider request."""
+
+        return AIExplanationService(self.provider).explain_request(self.request)
 
 
 SettingsLoader = Callable[[], ProviderSettings]
@@ -137,12 +171,24 @@ class AIExplanationWorkflow:
                 "OpenAI must be explicitly enabled in Provider Settings.",
                 settings.preferred_model_identifier,
             )
-        if settings.preferred_model_identifier not in (
-            SUPPORTED_OPENAI_MODEL_IDENTIFIERS
-        ):
+        try:
+            get_openai_model_capabilities(settings.preferred_model_identifier)
+        except AIUnsupportedModelError:
             return _unavailable_openai_status(
                 "unsupported_model",
-                "Select a supported OpenAI model in Provider Settings.",
+                "The configured OpenAI model is unsupported. Choose a supported "
+                "model explicitly in Provider Settings.",
+                settings.preferred_model_identifier,
+            )
+        except AIInvalidRequestError:
+            status_code = (
+                "empty_model"
+                if not settings.preferred_model_identifier
+                else "malformed_model"
+            )
+            return _unavailable_openai_status(
+                status_code,
+                "Configure a valid nonempty OpenAI model in Provider Settings.",
                 settings.preferred_model_identifier,
             )
         if self._credential_store is None:
@@ -208,12 +254,16 @@ class AIExplanationWorkflow:
         *,
         request_type: AIRequestType,
         selected_warning_identifier: str | None = None,
+        user_question: str | None = None,
     ) -> AIRequestReview:
         """Build an exact review for the currently ready provider and model."""
 
         status = self.status()
         if not status.available:
-            raise AIWorkflowUnavailableError(status.message)
+            raise AIWorkflowUnavailableError(
+                status.message,
+                status_code=status.status_code,
+            )
         return build_ai_request_review(
             report,
             provider_identifier=status.provider_identifier,
@@ -221,6 +271,7 @@ class AIExplanationWorkflow:
             model_identifier=status.model_identifier,
             request_type=request_type,
             selected_warning_identifier=selected_warning_identifier,
+            user_question=user_question,
         )
 
     def execute_review(
@@ -232,11 +283,29 @@ class AIExplanationWorkflow:
     ) -> AIExplanationResponse:
         """Consume one approved review and execute that exact request once."""
 
+        return self.prepare_execution(
+            consent,
+            current_report,
+            selected_warning_identifier=selected_warning_identifier,
+        ).execute()
+
+    def prepare_execution(
+        self,
+        consent: AIRequestConsent,
+        current_report: ModelHealthReport,
+        *,
+        selected_warning_identifier: str | None = None,
+    ) -> AIExecutionPlan:
+        """Consume consent and freeze provider/request state on the GUI thread."""
+
         if not isinstance(consent, AIRequestConsent):
             raise TypeError("consent must be an AIRequestConsent")
         status = self.status()
         if not status.available:
-            raise AIWorkflowUnavailableError(status.message)
+            raise AIWorkflowUnavailableError(
+                status.message,
+                status_code=status.status_code,
+            )
         review = consent.review
         if (
             status.provider_identifier != review.provider_identifier
@@ -245,16 +314,22 @@ class AIExplanationWorkflow:
             raise AIConsentInvalidatedError(
                 "The selected provider or model changed after preview; review it again."
             )
-        request = consent.consume(
-            current_report,
-            selected_warning_identifier=selected_warning_identifier,
-        )
         provider = self._provider_for_identifier(status.provider_identifier)
         if provider.provider_identifier != review.provider_identifier:
             raise AIConsentInvalidatedError(
                 "The provider implementation changed after preview; review it again."
             )
-        return AIExplanationService(provider).explain_request(request)
+        request = consent.consume(
+            current_report,
+            selected_warning_identifier=selected_warning_identifier,
+        )
+        return AIExecutionPlan(
+            request_type=review.request_type,
+            provider_identifier=review.provider_identifier,
+            model_identifier=review.model_identifier,
+            request=request,
+            provider=provider,
+        )
 
     def _load_settings(self) -> ProviderSettings:
         settings = self._settings_loader()
@@ -273,7 +348,8 @@ class AIExplanationWorkflow:
             provider = self._openai_provider(settings)
         else:
             raise AIWorkflowUnavailableError(
-                "The selected explanation provider is unsupported."
+                "The selected explanation provider is unsupported.",
+                status_code="unsupported_provider",
             )
         if not isinstance(provider, AIExplanationProvider):
             raise TypeError("provider factory returned an invalid provider")
@@ -285,7 +361,8 @@ class AIExplanationWorkflow:
     ) -> AIExplanationProvider:
         if self._credential_store is None:
             raise AIWorkflowUnavailableError(
-                "Secure credential storage is unavailable."
+                "Secure credential storage is unavailable.",
+                status_code="credential_backend_unavailable",
             )
         provider = self._openai_provider_factory(
             settings,
@@ -336,6 +413,7 @@ def _unavailable_openai_status(
 
 
 __all__ = [
+    "AIExecutionPlan",
     "AIExplanationWorkflow",
     "AIWorkflowStatus",
     "AIWorkflowUnavailableError",

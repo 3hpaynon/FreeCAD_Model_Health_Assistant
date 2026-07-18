@@ -1265,6 +1265,53 @@ def test_explanation_error_messages_distinguish_provider_failures_without_secret
     assert all("sk-secret-value" not in message for message in messages)
 
 
+def test_explanation_failure_logs_only_redacted_metadata_to_report_view() -> None:
+    from model_health_assistant.ai_provider import AIAuthenticationError
+
+    report_messages = []
+    status_values = {}
+    app_module = SimpleNamespace(
+        Console=SimpleNamespace(PrintMessage=report_messages.append)
+    )
+    controller = ui._ResultsDialogController(
+        SimpleNamespace(),
+        {},
+        status_label=SimpleNamespace(
+            setText=lambda text: status_values.update(text=text),
+            setVisible=lambda visible: status_values.update(visible=visible),
+        ),
+    )
+    controller.document_context = SimpleNamespace(app_module=app_module)
+    assert controller.begin_ai_operation(
+        "Running",
+        request_type="full-analysis",
+        provider_identifier="openai",
+    ) is True
+    ticket = controller.active_ai_ticket
+
+    ui._explanation_failed(
+        controller,
+        AIAuthenticationError(
+            r"sk-private-secret Authorization: Bearer private "
+            r"C:\Users\private\model.FCStd"
+        ),
+        ticket=ticket,
+        request_type="full-analysis",
+        provider_identifier="openai",
+        model_identifier="gpt-5.6-terra",
+    )
+
+    assert "rejected the configured API key" in status_values["text"]
+    diagnostic = "".join(report_messages)
+    assert "category=invalid_authentication" in diagnostic
+    assert "request_type=full-analysis" in diagnostic
+    assert "provider=openai" in diagnostic
+    assert "model=gpt-5.6-terra" in diagnostic
+    assert "private" not in diagnostic
+    assert "Authorization" not in diagnostic
+    assert "Users" not in diagnostic
+
+
 def test_full_analysis_action_requires_report_provider_and_idle_not_warning_selection() -> None:
     class FakeButton:
         def __init__(self) -> None:
@@ -1331,6 +1378,122 @@ def test_full_analysis_action_requires_report_provider_and_idle_not_warning_sele
     assert full_button.enabled is False
     assert controller.explain_full_analysis() is False
     assert "Provider unavailable" in messages["text"]
+
+
+def test_results_request_cancel_rejects_late_and_older_callbacks(monkeypatch) -> None:
+    class FakeButton:
+        def __init__(self) -> None:
+            self.enabled = False
+
+        def setEnabled(self, enabled: bool) -> None:  # noqa: N802
+            self.enabled = enabled
+
+    class FakeHandle:
+        def __init__(self) -> None:
+            self.cancelled = False
+            self.detached = False
+
+        def cancel(self) -> bool:
+            self.cancelled = True
+            return True
+
+        def detach(self) -> bool:
+            self.detached = True
+            return True
+
+    messages = {}
+    status_label = SimpleNamespace(
+        setText=lambda text: messages.update(text=text),
+        setVisible=lambda visible: messages.update(visible=visible),
+    )
+    cancel_button = FakeButton()
+    controller = ui._ResultsDialogController(
+        SimpleNamespace(),
+        {},
+        status_label=status_label,
+        cancel_ai_request_button=cancel_button,
+    )
+    launched = []
+
+    def fake_launcher(_qt_core, _parent, operation, success, failure):
+        handle = FakeHandle()
+        launched.append((operation, success, failure, handle))
+        return handle
+
+    monkeypatch.setattr(
+        "model_health_assistant.qt_async.start_qt_background_operation",
+        fake_launcher,
+    )
+    delivered = []
+    first_plan = SimpleNamespace(
+        request_type="full-analysis",
+        provider_identifier="openai",
+        execute=lambda: "first",
+    )
+    assert ui._launch_prepared_ai_execution(
+        controller,
+        first_plan,
+        object(),
+        object(),
+        progress_message="First request running.",
+        on_success=lambda result, ticket: delivered.append((result, ticket)),
+    ) is None
+    first_ticket = controller.active_ai_ticket
+    assert type(first_ticket) is int
+    assert cancel_button.enabled is True
+
+    assert controller.cancel_ai_operation() is True
+    cancelled_status = messages["text"]
+    assert launched[0][3].cancelled is True
+    assert cancel_button.enabled is False
+    launched[0][1]("late first result")
+    launched[0][2](RuntimeError("late first failure"))
+    assert delivered == []
+    assert messages["text"] == cancelled_status
+
+    second_plan = SimpleNamespace(
+        request_type="custom-question",
+        provider_identifier="local-mock",
+        execute=lambda: "second",
+    )
+    assert ui._launch_prepared_ai_execution(
+        controller,
+        second_plan,
+        object(),
+        object(),
+        progress_message="Second request running.",
+        on_success=lambda result, ticket: delivered.append((result, ticket)),
+    ) is None
+    second_ticket = controller.active_ai_ticket
+    assert second_ticket != first_ticket
+    launched[0][1]("older result after newer request")
+    launched[1][1]("accepted second result")
+
+    assert delivered == [("accepted second result", second_ticket)]
+
+
+def test_results_request_detach_and_destroy_are_callback_safe() -> None:
+    class FakeHandle:
+        def __init__(self) -> None:
+            self.detached = False
+
+        def detach(self) -> bool:
+            self.detached = True
+            return True
+
+    controller = ui._ResultsDialogController(SimpleNamespace(), {})
+    assert controller.begin_ai_operation("Running") is True
+    ticket = controller.active_ai_ticket
+    handle = FakeHandle()
+    assert controller.attach_ai_operation(ticket, handle) is True
+
+    controller.detach_ai_operation()
+
+    assert handle.detached is True
+    assert controller.is_ai_operation_current(ticket) is False
+    assert controller.begin_ai_operation("New request") is True
+    controller.close_ai_request_state()
+    assert controller.begin_ai_operation("After destruction") is False
 
 
 def _ai_preview_report() -> ModelHealthReport:

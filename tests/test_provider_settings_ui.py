@@ -9,6 +9,7 @@ from model_health_assistant.ai_models import AIUsageMetadata
 from model_health_assistant.ai_provider import (
     AIAuthenticationError,
     AIConnectionError,
+    AIDependencyMissingError,
     AIInvalidResponseError,
     AIMissingCredentialError,
     AIPermissionError,
@@ -139,21 +140,38 @@ class _ComboBox(_Widget):
         super().__init__()
         self.items: list[str] = []
         self.index = -1
+        self.editable = False
+        self.edit_text = ""
         self.currentIndexChanged = _Signal()
 
     def addItem(self, text: str) -> None:  # noqa: N802
         self.items.append(text)
         if self.index < 0:
             self.index = 0
+            self.edit_text = text
+
+    def setEditable(self, editable: bool) -> None:  # noqa: N802
+        self.editable = editable
 
     def setCurrentIndex(self, index: int) -> None:  # noqa: N802
         self.index = index
+        if 0 <= index < len(self.items):
+            self.edit_text = self.items[index]
         self.currentIndexChanged.emit(index)
+
+    def setCurrentText(self, text: str) -> None:  # noqa: N802
+        self.edit_text = text
+        try:
+            self.index = self.items.index(text)
+        except ValueError:
+            self.index = -1
 
     def currentIndex(self) -> int:  # noqa: N802
         return self.index
 
     def currentText(self) -> str:  # noqa: N802
+        if self.editable:
+            return self.edit_text
         return self.items[self.index]
 
     def findText(self, text: str) -> int:  # noqa: N802
@@ -319,12 +337,94 @@ def test_dialog_has_required_hidden_empty_key_and_disabled_connection_test() -> 
     assert widgets.test_connection_button.text == "Test Connection"
     assert widgets.test_connection_button.enabled is False
     assert len(widgets.test_connection_button.clicked.callbacks) == 1
+    assert widgets.cancel_request_button.text == "Cancel Request"
+    assert widgets.cancel_request_button.enabled is False
+    assert len(widgets.cancel_request_button.clicked.callbacks) == 1
     assert widgets.close_button.text == "Close"
     assert widgets.model_combo.items == [
         "gpt-5.6-luna",
         "gpt-5.6-terra",
         "gpt-5.6-sol",
     ]
+    assert widgets.model_combo.editable is True
+    assert "OpenAI SDK" in widgets.retry_input.tooltip
+    assert "authentication" in widgets.retry_input.tooltip
+
+
+def test_loading_unsupported_stored_model_preserves_exact_choice_locally() -> None:
+    controller, settings_backend, _credential_backend = _controller(
+        secret=_TEST_SECRET
+    )
+    configured_model = "future-model-preview"
+    settings_backend.values.update(
+        {
+            "provider_identifier": "openai",
+            "preferred_model_identifier": configured_model,
+            "real_provider_enabled": True,
+        }
+    )
+
+    controller.refresh()
+    widgets = controller.widgets
+
+    assert widgets.provider_combo.currentIndex() == 1
+    assert widgets.model_combo.currentText() == configured_model
+    assert widgets.model_combo.items[-1] == configured_model
+    assert widgets.model_combo.items.count(configured_model) == 1
+
+    controller.refresh()
+
+    assert widgets.model_combo.currentText() == configured_model
+    assert widgets.model_combo.items.count(configured_model) == 1
+
+    widgets.save_settings_button.clicked.emit()
+
+    assert settings_backend.write_count == 0
+    assert settings_backend.values["preferred_model_identifier"] == configured_model
+    assert widgets.model_combo.currentText() == configured_model
+    assert "unsupported" in widgets.operation_status_label.text.casefold()
+
+
+@pytest.mark.parametrize(
+    ("model_identifier", "expected_error"),
+    [
+        ("", "required"),
+        ("invalid model/value", "malformed"),
+        ("future-model-preview", "unsupported"),
+    ],
+)
+def test_invalid_model_cannot_be_saved_or_tested_and_selection_is_unchanged(
+    model_identifier: str,
+    expected_error: str,
+) -> None:
+    factory_calls = []
+    launcher = _DeferredLauncher()
+    controller, settings_backend, _credential_backend = _controller(
+        secret=_TEST_SECRET,
+        connection_provider_factory=lambda configuration: (
+            factory_calls.append(configuration) or _FakeConnectionProvider()
+        ),
+        worker_launcher=launcher,
+    )
+    widgets = controller.widgets
+    widgets.provider_combo.setCurrentIndex(1)
+    widgets.model_combo.setCurrentText(model_identifier)
+    _MessageBox.questions.clear()
+    _MessageBox.answer = _MessageBox.Yes
+
+    widgets.save_settings_button.clicked.emit()
+
+    assert settings_backend.write_count == 0
+    assert widgets.model_combo.currentText() == model_identifier
+    assert expected_error in widgets.operation_status_label.text.casefold()
+
+    controller.test_connection()
+
+    assert factory_calls == []
+    assert launcher.launches == []
+    assert _MessageBox.questions == []
+    assert widgets.model_combo.currentText() == model_identifier
+    assert expected_error in widgets.operation_status_label.text.casefold()
 
 
 def test_notices_cover_byok_charges_privacy_test_and_os_storage() -> None:
@@ -578,28 +678,58 @@ class _FakeConnectionProvider:
         return self.result
 
 
+class _DeferredHandle:
+    def __init__(self) -> None:
+        self.is_running = True
+        self.is_cancelled = False
+        self.is_detached = False
+
+    def cancel(self) -> bool:
+        if self.is_cancelled:
+            return False
+        self.is_cancelled = True
+        return True
+
+    def detach(self) -> bool:
+        if self.is_detached:
+            return False
+        self.is_detached = True
+        return True
+
+
 class _DeferredLauncher:
     def __init__(self) -> None:
         self.operation = None
         self.success = None
         self.failure = None
-        self.handle = SimpleNamespace(is_running=True)
+        self.handle = _DeferredHandle()
+        self.launches = []
 
     def __call__(self, operation, success, failure):
+        self.handle = _DeferredHandle()
         self.operation = operation
         self.success = success
         self.failure = failure
+        self.launches.append(
+            SimpleNamespace(
+                operation=operation,
+                success=success,
+                failure=failure,
+                handle=self.handle,
+            )
+        )
         return self.handle
 
-    def run(self) -> None:
+    def run(self, index: int = -1) -> None:
+        launch = self.launches[index]
         try:
-            result = self.operation()
+            result = launch.operation()
         except Exception as error:
-            self.handle.is_running = False
-            self.failure(error)
+            launch.handle.is_running = False
+            launch.failure(error)
             return
-        self.handle.is_running = False
-        self.success(result)
+        launch.handle.is_running = False
+        launch.success(result)
 
 
 def test_connection_requires_explicit_confirmation_and_runs_via_worker() -> None:
@@ -625,6 +755,11 @@ def test_connection_requires_explicit_confirmation_and_runs_via_worker() -> None
     assert provider.test_calls == 0
     assert launcher.operation is not None
     assert "testing" in widgets.operation_status_label.text.casefold()
+    assert widgets.test_connection_button.enabled is False
+    assert widgets.cancel_request_button.enabled is True
+    controller.test_connection()
+    assert len(launcher.launches) == 1
+    assert "already running" in widgets.operation_status_label.text.casefold()
     confirmation = str(_MessageBox.questions[-1]).casefold()
     assert "small provider charge" in confirmation
     assert "no cad data" in confirmation
@@ -640,8 +775,124 @@ def test_connection_requires_explicit_confirmation_and_runs_via_worker() -> None
     assert "Connection successful" in status
     assert "gpt-5.6-terra-test-snapshot" in status
     assert "resp_connection_ui_test" in status
-    assert "total 11" in status
+    assert "total=11" in status
+    assert "configured and actual model identifiers differ" in status
     assert _TEST_SECRET not in status
+    assert widgets.test_connection_button.enabled is True
+    assert widgets.cancel_request_button.enabled is False
+
+
+def test_cancel_request_is_logical_and_late_failure_is_ignored() -> None:
+    provider = _FakeConnectionProvider(
+        error=AIConnectionError("late provider failure")
+    )
+    launcher = _DeferredLauncher()
+    controller, _settings, _credentials = _controller(
+        secret=_TEST_SECRET,
+        connection_provider_factory=lambda _configuration: provider,
+        worker_launcher=launcher,
+    )
+    widgets = controller.widgets
+    widgets.provider_combo.setCurrentIndex(1)
+    _MessageBox.answer = _MessageBox.Yes
+
+    controller.test_connection()
+    cancelled_handle = launcher.launches[0].handle
+    assert controller._request_state.is_busy is True
+
+    widgets.cancel_request_button.clicked.emit()
+
+    cancelled_status = widgets.operation_status_label.text
+    assert cancelled_status.startswith("Cancelled.")
+    assert cancelled_handle.is_cancelled is True
+    assert cancelled_handle.is_running is True
+    assert controller._request_state.is_busy is False
+    assert widgets.cancel_request_button.enabled is False
+    assert widgets.test_connection_button.enabled is True
+
+    launcher.run(0)
+
+    assert provider.test_calls == 1
+    assert widgets.operation_status_label.text == cancelled_status
+    assert "failed" not in widgets.operation_status_label.text.casefold()
+
+
+def test_cancelled_request_cannot_overwrite_a_newer_connection_result() -> None:
+    old_provider = _FakeConnectionProvider(
+        result=AIConnectionTestResult(
+            provider_identifier="openai",
+            provider_display_name="OpenAI",
+            actual_model_identifier="old-model-result",
+            request_identifier="old-request",
+        )
+    )
+    new_provider = _FakeConnectionProvider(
+        result=AIConnectionTestResult(
+            provider_identifier="openai",
+            provider_display_name="OpenAI",
+            actual_model_identifier="new-model-result",
+            request_identifier="new-request",
+        )
+    )
+    providers = iter((old_provider, new_provider))
+    launcher = _DeferredLauncher()
+    controller, _settings, _credentials = _controller(
+        secret=_TEST_SECRET,
+        connection_provider_factory=lambda _configuration: next(providers),
+        worker_launcher=launcher,
+    )
+    widgets = controller.widgets
+    widgets.provider_combo.setCurrentIndex(1)
+    _MessageBox.answer = _MessageBox.Yes
+
+    controller.test_connection()
+    controller.cancel_connection_request()
+    controller.test_connection()
+
+    assert len(launcher.launches) == 2
+    assert controller._request_state.is_busy is True
+
+    launcher.run(1)
+    newer_status = widgets.operation_status_label.text
+    assert "new-model-result" in newer_status
+    assert "new-request" in newer_status
+
+    launcher.run(0)
+
+    assert widgets.operation_status_label.text == newer_status
+    assert "old-model-result" not in widgets.operation_status_label.text
+    assert "old-request" not in widgets.operation_status_label.text
+
+
+def test_closing_dialog_detaches_connection_callbacks_and_clears_busy_state() -> None:
+    provider = _FakeConnectionProvider()
+    launcher = _DeferredLauncher()
+    controller, _settings, _credentials = _controller(
+        secret=_TEST_SECRET,
+        connection_provider_factory=lambda _configuration: provider,
+        worker_launcher=launcher,
+    )
+    widgets = controller.widgets
+    widgets.provider_combo.setCurrentIndex(1)
+    widgets.api_key_input.setText(_TEST_SECRET)
+    _MessageBox.answer = _MessageBox.Yes
+
+    controller.test_connection()
+    detached_handle = launcher.launches[0].handle
+    status_before_close = widgets.operation_status_label.text
+
+    widgets.close_button.clicked.emit()
+
+    assert widgets.api_key_input.text() == ""
+    assert detached_handle.is_detached is True
+    assert detached_handle.is_running is True
+    assert controller._request_state.is_busy is False
+    assert widgets.cancel_request_button.enabled is False
+
+    launcher.run(0)
+
+    assert provider.test_calls == 1
+    assert widgets.operation_status_label.text == status_before_close
 
 
 def test_connection_distinguishes_dependency_key_and_provider_failures() -> None:
@@ -671,16 +922,17 @@ def test_connection_distinguishes_dependency_key_and_provider_failures() -> None
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
-        (AIMissingCredentialError(), "no secure OpenAI key"),
-        (AIAuthenticationError(), "key is invalid"),
-        (AIPermissionError(), "permission was denied"),
+        (AIMissingCredentialError(), "No provider API key"),
+        (AIAuthenticationError(), "rejected the configured API key"),
+        (AIPermissionError(), "lacks permission"),
         (AIUnsupportedModelError(), "model is unsupported"),
         (AIRateLimitError(), "rate limit"),
         (AIRequestTimeoutError(), "timed out"),
-        (AIConnectionError(), "offline or unreachable"),
-        (AIProviderServerError(), "server failure"),
-        (AIInvalidResponseError(), "invalid structured response"),
-        (AIProviderUnavailableError(), "SDK dependency"),
+        (AIConnectionError(), "could not be reached"),
+        (AIProviderServerError(), "server error"),
+        (AIInvalidResponseError(), "structured output"),
+        (AIDependencyMissingError(), "dependency is unavailable"),
+        (AIProviderUnavailableError(), "unknown reason"),
     ],
 )
 def test_connection_error_categories_are_safe_and_specific(

@@ -6,10 +6,15 @@ import importlib
 import json
 from collections.abc import Callable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import ModuleType
 from typing import Any
 
+from model_health_assistant.ai_model_capabilities import (
+    AIResolvedModelOptions,
+    SUPPORTED_OPENAI_MODEL_IDENTIFIERS,
+    resolve_openai_model_options,
+)
 from model_health_assistant.ai_connection import (
     AI_CONNECTION_SCHEMA_VERSION,
     AIConnectionTestResult,
@@ -24,6 +29,8 @@ from model_health_assistant.ai_models import (
 from model_health_assistant.ai_provider import (
     AIAuthenticationError,
     AIConnectionError,
+    AICredentialBackendUnavailableError,
+    AIDependencyMissingError,
     AIInvalidRequestError,
     AIInvalidResponseError,
     AIMissingCredentialError,
@@ -31,12 +38,13 @@ from model_health_assistant.ai_provider import (
     AIProviderError,
     AIProviderRefusalError,
     AIProviderServerError,
-    AIProviderUnavailableError,
     AIRateLimitError,
     AIRequestTimeoutError,
     AIUnsupportedSDKError,
     AIUnsupportedModelError,
+    AIUnknownProviderError,
 )
+from model_health_assistant.ai_prompts import serialize_grounded_question
 from model_health_assistant.ai_service import validate_ai_explanation_response
 from model_health_assistant.credentials import (
     CredentialBackendUnavailableError,
@@ -50,11 +58,6 @@ from model_health_assistant.runtime_dependencies import (
 OPENAI_PROVIDER_IDENTIFIER = "openai"
 OPENAI_PROVIDER_DISPLAY_NAME = "OpenAI"
 DEFAULT_OPENAI_MODEL_IDENTIFIER = "gpt-5.6-terra"
-SUPPORTED_OPENAI_MODEL_IDENTIFIERS = (
-    "gpt-5.6-luna",
-    "gpt-5.6-terra",
-    "gpt-5.6-sol",
-)
 DEFAULT_OPENAI_CONNECT_TIMEOUT_SECONDS = 10
 DEFAULT_OPENAI_READ_TIMEOUT_SECONDS = 45
 DEFAULT_OPENAI_REQUEST_TIMEOUT_SECONDS = 60
@@ -62,6 +65,23 @@ DEFAULT_OPENAI_MAXIMUM_RETRIES = 2
 DEFAULT_OPENAI_MAXIMUM_OUTPUT_TOKENS = 1200
 DEFAULT_OPENAI_REASONING_EFFORT = "low"
 DEFAULT_OPENAI_RESPONSE_VERBOSITY = "medium"
+OPENAI_RETRY_POLICY_OWNER = "openai-sdk"
+OPENAI_RETRYABLE_FAILURES = (
+    "connection_error",
+    "request_timeout",
+    "http_408",
+    "http_409",
+    "rate_limit",
+    "provider_server_error",
+)
+OPENAI_NON_RETRYABLE_FAILURES = (
+    "authentication",
+    "permission",
+    "invalid_request",
+    "unsupported_model",
+    "provider_refusal",
+    "malformed_response",
+)
 
 OPENAI_EXPLANATION_RESPONSE_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -153,12 +173,11 @@ class OpenAIProviderConfiguration:
     request_timeout_seconds: int = DEFAULT_OPENAI_REQUEST_TIMEOUT_SECONDS
     maximum_retries: int = DEFAULT_OPENAI_MAXIMUM_RETRIES
     maximum_output_tokens: int = DEFAULT_OPENAI_MAXIMUM_OUTPUT_TOKENS
-    reasoning_effort: str = DEFAULT_OPENAI_REASONING_EFFORT
-    response_verbosity: str = DEFAULT_OPENAI_RESPONSE_VERBOSITY
+    reasoning_effort: str | None = None
+    response_verbosity: str | None = None
+    resolved_options: AIResolvedModelOptions = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if self.model_identifier not in SUPPORTED_OPENAI_MODEL_IDENTIFIERS:
-            raise ValueError("Unsupported OpenAI model identifier.")
         for name, value, minimum, maximum in (
             ("connect timeout", self.connect_timeout_seconds, 1, 60),
             ("read timeout", self.read_timeout_seconds, 1, 300),
@@ -168,17 +187,16 @@ class OpenAIProviderConfiguration:
         ):
             if type(value) is not int or not minimum <= value <= maximum:
                 raise ValueError(f"Invalid {name}.")
-        if self.reasoning_effort not in {
-            "none",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-        }:
-            raise ValueError("Unsupported reasoning effort.")
-        if self.response_verbosity not in {"low", "medium", "high"}:
-            raise ValueError("Unsupported response verbosity.")
+        resolved = resolve_openai_model_options(
+            self.model_identifier,
+            reasoning_effort=self.reasoning_effort,
+            response_verbosity=self.response_verbosity,
+            maximum_output_tokens=self.maximum_output_tokens,
+            require_structured_outputs=True,
+        )
+        object.__setattr__(self, "resolved_options", resolved)
+        object.__setattr__(self, "reasoning_effort", resolved.reasoning_effort)
+        object.__setattr__(self, "response_verbosity", resolved.response_verbosity)
 
 
 class OpenAIExplanationProvider:
@@ -340,15 +358,14 @@ class OpenAIExplanationProvider:
         return result
 
     def _connection_request_arguments(self) -> dict[str, object]:
-        return {
+        options = self._configuration.resolved_options
+        arguments: dict[str, object] = {
             "model": self._configuration.model_identifier,
             "instructions": (
                 "Return only the requested connection-test JSON. This request "
                 "contains no CAD, document, feature, or model-health data."
             ),
             "input": "Return status ok using the required schema.",
-            "max_output_tokens": 64,
-            "reasoning": {"effort": "none"},
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -356,12 +373,6 @@ class OpenAIExplanationProvider:
                     "strict": True,
                     "schema": deepcopy(OPENAI_CONNECTION_RESPONSE_SCHEMA),
                 },
-                "verbosity": "low",
-            },
-            "metadata": {
-                "application": "freecad-model-health-assistant",
-                "purpose": "provider_connection_test",
-                "response_schema_version": AI_CONNECTION_SCHEMA_VERSION,
             },
             "store": False,
             "background": False,
@@ -370,6 +381,23 @@ class OpenAIExplanationProvider:
             "tool_choice": "none",
             "parallel_tool_calls": False,
         }
+        if options.output_token_limit_parameter is not None:
+            arguments[options.output_token_limit_parameter] = 64
+        if "none" in options.capabilities.reasoning_efforts:
+            arguments["reasoning"] = {"effort": "none"}
+        text_options = arguments["text"]
+        if (
+            isinstance(text_options, dict)
+            and "low" in options.capabilities.response_verbosities
+        ):
+            text_options["verbosity"] = "low"
+        if options.capabilities.supports_request_metadata:
+            arguments["metadata"] = {
+                "application": "freecad-model-health-assistant",
+                "purpose": "provider_connection_test",
+                "response_schema_version": AI_CONNECTION_SCHEMA_VERSION,
+            }
+        return arguments
 
     def _retrieve_credential(self) -> str:
         controlled_error: AIProviderError | None = None
@@ -381,11 +409,11 @@ class OpenAIExplanationProvider:
                 "No secure OpenAI credential is configured."
             )
         except (CredentialBackendUnavailableError, CredentialStorageError):
-            controlled_error = AIProviderUnavailableError(
+            controlled_error = AICredentialBackendUnavailableError(
                 "Secure OpenAI credential retrieval is unavailable."
             )
         except Exception:
-            controlled_error = AIProviderUnavailableError(
+            controlled_error = AICredentialBackendUnavailableError(
                 "Secure OpenAI credential retrieval failed safely."
             )
         if controlled_error is not None:
@@ -417,11 +445,11 @@ class OpenAIExplanationProvider:
             import_failed = True
             sdk_module = None
         if missing_sdk:
-            raise AIProviderUnavailableError(
+            raise AIDependencyMissingError(
                 "The optional OpenAI SDK is not installed."
             )
         if import_failed or sdk_module is None:
-            raise AIProviderUnavailableError(
+            raise AIDependencyMissingError(
                 "The optional OpenAI SDK could not be loaded safely."
             )
         if not callable(getattr(sdk_module, "OpenAI", None)):
@@ -447,6 +475,7 @@ class OpenAIExplanationProvider:
         )
 
     def _request_arguments(self, request: AIExplanationRequest) -> dict[str, object]:
+        options = self._configuration.resolved_options
         metadata = {
             "application": "freecad-model-health-assistant",
             "purpose": request.metadata.purpose,
@@ -457,22 +486,21 @@ class OpenAIExplanationProvider:
             metadata["prompt_template_version"] = (
                 request.metadata.prompt_template_version
             )
-        return {
+        text_options: dict[str, object] = {
+            "format": {
+                "type": "json_schema",
+                "name": "model_health_explanation",
+                "strict": True,
+                "schema": deepcopy(OPENAI_EXPLANATION_RESPONSE_SCHEMA),
+            },
+        }
+        if options.response_verbosity is not None:
+            text_options["verbosity"] = options.response_verbosity
+        arguments: dict[str, object] = {
             "model": self._configuration.model_identifier,
             "instructions": request.system_instruction,
-            "input": request.user_prompt,
-            "max_output_tokens": self._configuration.maximum_output_tokens,
-            "reasoning": {"effort": self._configuration.reasoning_effort},
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "model_health_explanation",
-                    "strict": True,
-                    "schema": deepcopy(OPENAI_EXPLANATION_RESPONSE_SCHEMA),
-                },
-                "verbosity": self._configuration.response_verbosity,
-            },
-            "metadata": metadata,
+            "input": _provider_input(request),
+            "text": text_options,
             "store": False,
             "background": False,
             "stream": False,
@@ -480,6 +508,18 @@ class OpenAIExplanationProvider:
             "tool_choice": "none",
             "parallel_tool_calls": False,
         }
+        if (
+            options.output_token_limit_parameter is not None
+            and options.maximum_output_tokens is not None
+        ):
+            arguments[options.output_token_limit_parameter] = (
+                options.maximum_output_tokens
+            )
+        if options.reasoning_effort is not None:
+            arguments["reasoning"] = {"effort": options.reasoning_effort}
+        if options.capabilities.supports_request_metadata:
+            arguments["metadata"] = metadata
+        return arguments
 
     def _translate_response(
         self,
@@ -522,6 +562,33 @@ class OpenAIExplanationProvider:
             expected_provider_identifier=OPENAI_PROVIDER_IDENTIFIER,
         )
         return response
+
+
+def _provider_input(request: AIExplanationRequest) -> object:
+    """Keep a one-shot user question distinct from untrusted CAD context."""
+
+    if request.user_question is None:
+        return request.user_prompt
+    return [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": request.user_prompt,
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": serialize_grounded_question(request.user_question),
+                }
+            ],
+        },
+    ]
 
 
 def _response_create_method(client: object) -> Callable[..., object]:
@@ -712,8 +779,8 @@ def _map_sdk_error(error: Exception, sdk_module: ModuleType | None) -> AIProvide
     if type(status_code) is int and status_code >= 500:
         return AIProviderServerError("OpenAI reported a server failure.")
     if isinstance(error, ModuleNotFoundError):
-        return AIProviderUnavailableError("An OpenAI runtime dependency is missing.")
-    return AIProviderUnavailableError("OpenAI provider execution failed safely.")
+        return AIDependencyMissingError("An OpenAI runtime dependency is missing.")
+    return AIUnknownProviderError("OpenAI provider execution failed safely.")
 
 
 __all__ = [
@@ -729,6 +796,9 @@ __all__ = [
     "OPENAI_CONNECTION_RESPONSE_SCHEMA",
     "OPENAI_PROVIDER_DISPLAY_NAME",
     "OPENAI_PROVIDER_IDENTIFIER",
+    "OPENAI_NON_RETRYABLE_FAILURES",
+    "OPENAI_RETRYABLE_FAILURES",
+    "OPENAI_RETRY_POLICY_OWNER",
     "SUPPORTED_OPENAI_MODEL_IDENTIFIERS",
     "OpenAIExplanationProvider",
     "OpenAIProviderConfiguration",

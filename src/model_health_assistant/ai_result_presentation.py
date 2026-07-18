@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from model_health_assistant.ai_consent import AIRequestReview
 from model_health_assistant.ai_models import AIExplanationResponse
+from model_health_assistant.ai_usage_presentation import (
+    build_ai_usage_presentation,
+)
 from model_health_assistant.presentation import WarningDisplayItem
 
 AI_ADVISORY_DISCLAIMER = (
@@ -44,11 +47,7 @@ def format_selected_warning_explanation(
         "",
         "AI EXPLANATION (ADVISORY)",
         "=" * 48,
-        f"Provider: {response.provider_display_name} ({response.provider_identifier})",
-        f"Requested model: {review.model_identifier}",
-        f"Actual model: {response.actual_model_identifier or 'Not reported'}",
-        f"Request ID: {response.request_identifier or 'Not reported'}",
-        f"Usage: {_format_usage(response)}",
+        *_provider_metadata_lines(response, review),
         "Overall summary:",
         response.overall_summary,
     ]
@@ -142,11 +141,7 @@ def format_full_analysis_explanation(
         )
     lines.extend(
         [
-        f"Provider: {response.provider_display_name} ({response.provider_identifier})",
-        f"Requested model: {review.model_identifier}",
-        f"Actual model: {response.actual_model_identifier or 'Not reported'}",
-        f"Request ID: {response.request_identifier or 'Not reported'}",
-        f"Usage: {_format_usage(response)}",
+        *_provider_metadata_lines(response, review),
         "",
         "REVIEWED CONTEXT COVERAGE",
         f"Warnings in completed analysis: {metadata.original_warning_count}",
@@ -268,22 +263,82 @@ def format_full_analysis_explanation(
     return "\n".join(lines)
 
 
-def _format_usage(response: AIExplanationResponse) -> str:
-    usage = response.usage
-    if usage is None:
-        return "Not reported"
-    values = (
-        ("input", usage.input_tokens),
-        ("output", usage.output_tokens),
-        ("total", usage.total_tokens),
-        ("reasoning", usage.reasoning_tokens),
+def format_grounded_question_response(
+    response: AIExplanationResponse,
+    review: AIRequestReview,
+) -> str:
+    """Format one non-persistent answer grounded in the reviewed analysis."""
+
+    question = review.user_question
+    if (
+        review.request_type != "custom-question"
+        or not isinstance(question, str)
+        or not question.strip()
+        or review.request.user_question != question
+    ):
+        raise ValueError("A reviewed grounded question is required.")
+
+    context = review.request.context
+    lines = [
+        "ASK ABOUT THIS ANALYSIS (ONE-SHOT, READ-ONLY ADVISORY)",
+        "=" * 60,
+        *_provider_metadata_lines(response, review),
+        "",
+        "USER QUESTION",
+        question,
+        "",
+        "GROUNDED AI ANSWER",
+        response.overall_summary,
+        "",
+        "REVIEWED CONTEXT COVERAGE",
+        f"Warnings included: {context.metadata.included_warning_count}",
+        f"Warnings omitted: {context.metadata.omitted_warning_count}",
+        f"Context truncated: {'Yes' if context.metadata.was_truncated else 'No'}",
+        "",
+        "RELATED SOURCE-WARNING EXPLANATIONS",
+    ]
+    if not response.warning_explanations:
+        lines.append("None supplied.")
+    for index, explanation in enumerate(response.warning_explanations, start=1):
+        lines.extend(
+            (
+                f"{index}. Rule: {explanation.rule_id}",
+                f"   Feature: {explanation.affected_feature_internal_name}",
+                f"   Explanation: {explanation.explanation}",
+                f"   Why it matters: {explanation.why_it_matters}",
+            )
+        )
+    lines.extend(("", "OVERALL LIMITATIONS"))
+    lines.extend(f"- {item}" for item in response.limitations)
+    lines.extend(
+        (
+            "",
+            "NO CHAT HISTORY",
+            (
+                "This answer used only the displayed one-shot question and reviewed "
+                "privacy-safe context. It was not chained to a previous response."
+            ),
+            "",
+            "DISCLAIMER",
+            AI_ADVISORY_DISCLAIMER,
+        )
     )
-    reported = [f"{name}={value}" for name, value in values if value is not None]
-    return ", ".join(reported) if reported else "Not reported"
+    return "\n".join(lines)
+
+
+def _provider_metadata_lines(
+    response: AIExplanationResponse,
+    review: AIRequestReview,
+) -> tuple[str, ...]:
+    return build_ai_usage_presentation(
+        response,
+        configured_model_identifier=review.model_identifier,
+    ).lines()
 
 
 __all__ = [
     "AI_ADVISORY_DISCLAIMER",
     "format_full_analysis_explanation",
+    "format_grounded_question_response",
     "format_selected_warning_explanation",
 ]

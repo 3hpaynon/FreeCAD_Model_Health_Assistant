@@ -125,11 +125,18 @@ class AIRequestMetadata:
 
 @dataclass(slots=True, kw_only=True)
 class AIExplanationRequest:
-    """Complete provider-neutral prompt request produced by a future builder."""
+    """Complete provider-neutral request produced by the prompt builder.
+
+    ``user_question`` is intentionally separate from ``user_prompt``.  The
+    latter contains only the delimited, privacy-safe CAD-derived context, while
+    the former is an optional user-authored grounded question.  Providers must
+    not merge the two sources before applying their trust boundaries.
+    """
 
     context: AIRequestContext
     system_instruction: str
     user_prompt: str
+    user_question: str | None = None
     metadata: AIRequestMetadata = field(default_factory=AIRequestMetadata)
     schema_version: str = AI_REQUEST_SCHEMA_VERSION
 

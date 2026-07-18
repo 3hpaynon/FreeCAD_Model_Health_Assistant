@@ -1,7 +1,7 @@
 """Guarded FreeCAD/PySide interface for provider settings and credentials.
 
-This module intentionally has no provider execution path. Opening, saving, or
-closing the dialog cannot create an OpenAI client or make a network request.
+Opening, saving, or closing the dialog cannot make a network request. Only the
+explicitly confirmed Test Connection action can start a minimal provider call.
 """
 
 from __future__ import annotations
@@ -13,20 +13,19 @@ from model_health_assistant.ai_connection import (
     AIConnectionTestResult,
     AIConnectionTester,
 )
+from model_health_assistant.ai_error_handling import categorize_ai_error
+from model_health_assistant.ai_model_capabilities import (
+    get_openai_model_capabilities,
+    validate_model_identifier_syntax,
+)
 from model_health_assistant.ai_provider import (
-    AIAuthenticationError,
-    AIConnectionError,
     AIInvalidRequestError,
-    AIInvalidResponseError,
-    AIMissingCredentialError,
-    AIPermissionError,
-    AIProviderRefusalError,
-    AIProviderServerError,
-    AIProviderUnavailableError,
-    AIRateLimitError,
-    AIRequestTimeoutError,
+    AIProviderError,
     AIUnsupportedModelError,
-    AIUnsupportedSDKError,
+)
+from model_health_assistant.ai_request_state import AIRequestStateController
+from model_health_assistant.ai_usage_presentation import (
+    build_ai_usage_presentation,
 )
 
 from model_health_assistant.credentials import (
@@ -83,7 +82,7 @@ PROVIDER_NOTICE = (
 PRIVACY_NOTICE = (
     "No CAD data is sent while a key or these settings are stored. Test "
     "Connection sends a small provider request and no CAD data. Connection "
-    "testing is not enabled in this step."
+    "testing occurs only after explicit confirmation."
 )
 CREDENTIAL_STORAGE_NOTICE = (
     "The API key is stored by the operating-system credential backend. It is "
@@ -116,6 +115,7 @@ class _ProviderSettingsWidgets:
     replace_key_button: Any
     remove_key_button: Any
     test_connection_button: Any
+    cancel_request_button: Any
     save_settings_button: Any
     close_button: Any
     operation_status_label: Any
@@ -145,10 +145,12 @@ class _ProviderSettingsDialogController:
         self._credential_configured = False
         self._credential_backend_available = False
         self._connection_operation: object | None = None
+        self._request_state = AIRequestStateController()
 
     def refresh(self) -> None:
         """Reload non-secret state while keeping the API key field empty."""
 
+        request_was_running = self._request_state.is_busy
         self.clear_api_key_input()
         try:
             settings = self._settings_store.load()
@@ -158,7 +160,12 @@ class _ProviderSettingsDialogController:
                 "Provider settings could not be loaded; safe defaults are shown."
             )
         else:
-            self._set_operation_status("")
+            if request_was_running:
+                self._set_operation_status(
+                    self._request_state.snapshot.progress_message
+                )
+            else:
+                self._set_operation_status("")
         self._loaded_settings = settings
         self._apply_settings(settings)
         self.refresh_credential_status()
@@ -174,8 +181,15 @@ class _ProviderSettingsDialogController:
             activate_window()
 
     def close(self) -> None:
+        self._detach_connection_request()
         self.clear_api_key_input()
         self.widgets.dialog.close()
+
+    def dialog_finished(self) -> None:
+        """Detach late worker callbacks when the reusable dialog is closed."""
+
+        self._detach_connection_request()
+        self.clear_api_key_input()
 
     def clear_api_key_input(self) -> None:
         self.widgets.api_key_input.clear()
@@ -190,6 +204,10 @@ class _ProviderSettingsDialogController:
             return
         if self._connection_is_running():
             self._set_operation_status("A provider connection test is already running.")
+            return
+        model_identifier, model_error = self._validated_openai_model_identifier()
+        if model_error is not None:
+            self._set_operation_status(model_error)
             return
         self.refresh_credential_status()
         if not self._credential_backend_available:
@@ -209,10 +227,14 @@ class _ProviderSettingsDialogController:
             return
 
         try:
-            configuration = self._openai_configuration()
+            configuration = self._openai_configuration(model_identifier)
             provider = self._connection_provider_factory(configuration)
-        except (TypeError, ValueError):
-            self._set_operation_status("The OpenAI settings are invalid.")
+        except (AIProviderError, TypeError, ValueError) as error:
+            if isinstance(error, AIProviderError):
+                message = categorize_ai_error(error).user_message
+            else:
+                message = "The OpenAI settings are invalid."
+            self._set_operation_status(message)
             return
         try:
             sdk_available = provider.is_available()
@@ -232,58 +254,147 @@ class _ProviderSettingsDialogController:
             self._set_operation_status("Connection test cancelled. No request was sent.")
             return
 
-        self._set_operation_status("Testing the OpenAI connection...")
-        self._update_openai_control_state(force_busy=True)
+        progress_message = "Testing the OpenAI connection..."
         try:
-            self._connection_operation = self._worker_launcher(
+            ticket = self._request_state.begin(
+                "connection-test",
+                OPENAI_PROVIDER_IDENTIFIER,
+                progress_message=progress_message,
+            )
+        except Exception:
+            self._set_operation_status(
+                "A provider connection test is already running."
+            )
+            self._update_openai_control_state()
+            return
+        self._set_operation_status(progress_message)
+        self._update_openai_control_state()
+        try:
+            operation = self._worker_launcher(
                 provider.test_connection,
-                self._connection_test_succeeded,
-                self._connection_test_failed,
+                lambda result, held_ticket=ticket: self._connection_test_succeeded(
+                    held_ticket,
+                    configuration.model_identifier,
+                    result,
+                ),
+                lambda error, held_ticket=ticket: self._connection_test_failed(
+                    held_ticket,
+                    error,
+                ),
             )
         except Exception:
             self._connection_operation = None
-            self._set_operation_status("The connection-test worker could not start.")
-            self._update_openai_control_state()
-
-    def _connection_test_succeeded(self, result: object) -> None:
-        self._connection_operation = None
-        if not isinstance(result, AIConnectionTestResult):
-            self._set_operation_status("Invalid structured connection-test response.")
+            failure_message = "The connection-test worker could not start."
+            self._request_state.accept_failure(
+                ticket,
+                progress_message=failure_message,
+            )
+            self._set_operation_status(failure_message)
             self._update_openai_control_state()
             return
-        details = [
-            "Connection successful.",
-            f"Provider: {result.provider_display_name}.",
-        ]
-        if result.actual_model_identifier:
-            details.append(f"Model: {result.actual_model_identifier}.")
-        if result.request_identifier:
-            details.append(f"Request ID: {result.request_identifier}.")
-        if result.usage is not None:
-            usage_parts = []
-            if result.usage.input_tokens is not None:
-                usage_parts.append(f"input {result.usage.input_tokens}")
-            if result.usage.output_tokens is not None:
-                usage_parts.append(f"output {result.usage.output_tokens}")
-            if result.usage.total_tokens is not None:
-                usage_parts.append(f"total {result.usage.total_tokens}")
-            if usage_parts:
-                details.append("Token usage: " + ", ".join(usage_parts) + ".")
-        self._set_operation_status(" ".join(details))
+        if self._request_state.active_ticket == ticket:
+            self._connection_operation = operation
+        else:
+            self._connection_operation = None
+
+    def cancel_connection_request(self) -> bool:
+        """Logically cancel the active connection test without stopping its thread."""
+
+        ticket = self._request_state.active_ticket
+        if ticket is None:
+            self._set_operation_status("No provider request is currently running.")
+            self._update_openai_control_state()
+            return False
+        cancellation_message = (
+            "Cancelled. The in-progress connection-test result will be ignored."
+        )
+        if not self._request_state.cancel(
+            ticket,
+            progress_message=cancellation_message,
+        ):
+            return False
+        operation = self._connection_operation
+        cancel = getattr(operation, "cancel", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:
+                pass
+        self._connection_operation = None
+        self._set_operation_status(cancellation_message)
+        self._update_openai_control_state()
+        return True
+
+    def _detach_connection_request(self) -> None:
+        operation = self._connection_operation
+        if self._request_state.is_busy:
+            self._request_state.detach(
+                progress_message="Connection test detached from the closed dialog."
+            )
+        detach = getattr(operation, "detach", None)
+        if callable(detach):
+            try:
+                detach()
+            except Exception:
+                pass
+        self._connection_operation = None
         self._update_openai_control_state()
 
-    def _connection_test_failed(self, error: BaseException) -> None:
+    def _connection_test_succeeded(
+        self,
+        ticket: int,
+        configured_model_identifier: str,
+        result: object,
+    ) -> None:
+        if self._request_state.active_ticket != ticket:
+            return
+        if not isinstance(result, AIConnectionTestResult):
+            failure_message = "Invalid structured connection-test response."
+            if not self._request_state.accept_failure(
+                ticket,
+                progress_message=failure_message,
+            ):
+                return
+            self._connection_operation = None
+            self._set_operation_status(failure_message)
+            self._update_openai_control_state()
+            return
+        metadata = build_ai_usage_presentation(
+            result,
+            configured_model_identifier=configured_model_identifier,
+        )
+        success_message = "Connection successful. " + " ".join(
+            line + "." for line in metadata.lines()
+        )
+        if not self._request_state.accept_success(
+            ticket,
+            progress_message=success_message,
+        ):
+            return
         self._connection_operation = None
-        self._set_operation_status(_connection_error_text(error))
+        self._set_operation_status(success_message)
+        self._update_openai_control_state()
+
+    def _connection_test_failed(self, ticket: int, error: BaseException) -> None:
+        failure_message = _connection_error_text(error)
+        if not self._request_state.accept_failure(
+            ticket,
+            progress_message=failure_message,
+        ):
+            return
+        self._connection_operation = None
+        self._set_operation_status(failure_message)
         self._update_openai_control_state()
 
     def save_settings(self) -> None:
         provider_identifier = self._selected_provider_identifier()
-        model_identifier = (
-            str(self.widgets.model_combo.currentText()).strip()
-            if provider_identifier == OPENAI_PROVIDER_IDENTIFIER
-            else ""
-        )
+        if provider_identifier == OPENAI_PROVIDER_IDENTIFIER:
+            model_identifier, model_error = self._validated_openai_model_identifier()
+            if model_error is not None:
+                self._set_operation_status(model_error)
+                return
+        else:
+            model_identifier = ""
         try:
             settings = ProviderSettings(
                 provider_identifier=provider_identifier,
@@ -442,11 +553,12 @@ class _ProviderSettingsDialogController:
         )
         self.widgets.provider_combo.setCurrentIndex(provider_index)
         preferred_model = (
-            settings.preferred_model_identifier
-            if settings.preferred_model_identifier in SUPPORTED_OPENAI_MODEL_IDENTIFIERS
-            else DEFAULT_OPENAI_MODEL_IDENTIFIER
+            settings.preferred_model_identifier or DEFAULT_OPENAI_MODEL_IDENTIFIER
         )
         model_index = self.widgets.model_combo.findText(preferred_model)
+        if model_index < 0 and settings.preferred_model_identifier:
+            self.widgets.model_combo.addItem(settings.preferred_model_identifier)
+            model_index = self.widgets.model_combo.findText(preferred_model)
         self.widgets.model_combo.setCurrentIndex(max(0, model_index))
         self.widgets.timeout_input.setValue(settings.request_timeout_seconds)
         self.widgets.retry_input.setValue(settings.maximum_retries)
@@ -467,9 +579,35 @@ class _ProviderSettingsDialogController:
         )
         return False
 
-    def _openai_configuration(self) -> OpenAIProviderConfiguration:
+    def _validated_openai_model_identifier(self) -> tuple[str, str | None]:
+        model_identifier = str(self.widgets.model_combo.currentText())
+        try:
+            validate_model_identifier_syntax(model_identifier)
+            get_openai_model_capabilities(model_identifier)
+        except AIUnsupportedModelError:
+            return model_identifier, (
+                "The configured OpenAI model is unsupported. Choose a supported "
+                "model explicitly; the current model selection was not changed."
+            )
+        except AIInvalidRequestError:
+            if not model_identifier.strip():
+                return "", (
+                    "An OpenAI model identifier is required. The current model "
+                    "selection was not changed."
+                )
+            return model_identifier, (
+                "The OpenAI model identifier is malformed. Use only lowercase "
+                "letters, numbers, '.', '_', ':', or '-'. The current model "
+                "selection was not changed."
+            )
+        return model_identifier, None
+
+    def _openai_configuration(
+        self,
+        model_identifier: str,
+    ) -> OpenAIProviderConfiguration:
         return OpenAIProviderConfiguration(
-            model_identifier=str(self.widgets.model_combo.currentText()).strip(),
+            model_identifier=model_identifier,
             request_timeout_seconds=int(self.widgets.timeout_input.value()),
             maximum_retries=int(self.widgets.retry_input.value()),
             maximum_output_tokens=int(self.widgets.maximum_output_input.value()),
@@ -484,9 +622,7 @@ class _ProviderSettingsDialogController:
         )
 
     def _connection_is_running(self) -> bool:
-        if self._connection_operation is None:
-            return False
-        return bool(getattr(self._connection_operation, "is_running", True))
+        return self._request_state.is_busy
 
     def _update_openai_control_state(self, *, force_busy: bool = False) -> None:
         openai_selected = (
@@ -525,6 +661,7 @@ class _ProviderSettingsDialogController:
             and self._worker_launcher is not None
             and self._confirm_connection_test is not None
         )
+        self.widgets.cancel_request_button.setEnabled(connection_busy)
 
     def _set_operation_status(self, text: str) -> None:
         self.widgets.operation_status_label.setText(text)
@@ -651,6 +788,9 @@ def _create_provider_settings_dialog(
     model_combo = qt_widgets.QComboBox(dialog)
     for model_identifier in SUPPORTED_OPENAI_MODEL_IDENTIFIERS:
         model_combo.addItem(model_identifier)
+    set_model_editable = getattr(model_combo, "setEditable", None)
+    if callable(set_model_editable):
+        set_model_editable(True)
     form_layout.addRow("Model:", model_combo)
 
     timeout_input = qt_widgets.QSpinBox(dialog)
@@ -663,6 +803,11 @@ def _create_provider_settings_dialog(
 
     retry_input = qt_widgets.QSpinBox(dialog)
     retry_input.setRange(0, MAXIMUM_RETRY_COUNT)
+    retry_input.setToolTip(
+        "Retries are owned only by the OpenAI SDK and are bounded by this value. "
+        "Connection, timeout, rate-limit, and server failures may be retried; "
+        "authentication and permission failures are not retried."
+    )
     form_layout.addRow("Maximum retries:", retry_input)
 
     maximum_output_input = qt_widgets.QSpinBox(dialog)
@@ -681,9 +826,15 @@ def _create_provider_settings_dialog(
     test_connection_button.setToolTip(
         "Explicitly send a small provider request containing no CAD data."
     )
+    cancel_request_button = qt_widgets.QPushButton("Cancel Request", dialog)
+    cancel_request_button.setToolTip(
+        "Ignore the in-progress result without terminating its worker thread."
+    )
+    cancel_request_button.setEnabled(False)
     save_settings_button = qt_widgets.QPushButton("Save Settings", dialog)
     close_button = qt_widgets.QPushButton("Close", dialog)
     bottom_button_layout.addWidget(test_connection_button)
+    bottom_button_layout.addWidget(cancel_request_button)
     bottom_button_layout.addStretch(1)
     bottom_button_layout.addWidget(save_settings_button)
     bottom_button_layout.addWidget(close_button)
@@ -702,6 +853,7 @@ def _create_provider_settings_dialog(
         replace_key_button=replace_key_button,
         remove_key_button=remove_key_button,
         test_connection_button=test_connection_button,
+        cancel_request_button=cancel_request_button,
         save_settings_button=save_settings_button,
         close_button=close_button,
         operation_status_label=operation_status_label,
@@ -747,12 +899,15 @@ def _create_provider_settings_dialog(
     test_connection_button.clicked.connect(
         lambda *_args: controller.test_connection()
     )
+    cancel_request_button.clicked.connect(
+        lambda *_args: controller.cancel_connection_request()
+    )
     save_settings_button.clicked.connect(lambda *_args: controller.save_settings())
     close_button.clicked.connect(lambda *_args: controller.close())
     finished_signal = getattr(dialog, "finished", None)
     if finished_signal is not None and hasattr(finished_signal, "connect"):
         finished_signal.connect(
-            lambda *_args: controller.clear_api_key_input()
+            lambda *_args: controller.dialog_finished()
         )
     controller.refresh()
     return controller
@@ -771,29 +926,7 @@ def _credential_status_text(status: ProviderCredentialStatus) -> str:
 
 
 def _connection_error_text(error: BaseException) -> str:
-    if isinstance(error, AIMissingCredentialError):
-        return "Connection failed: no secure OpenAI key is configured."
-    if isinstance(error, AIAuthenticationError):
-        return "Connection failed: the OpenAI key is invalid."
-    if isinstance(error, AIPermissionError):
-        return "Connection failed: OpenAI permission was denied."
-    if isinstance(error, AIUnsupportedModelError):
-        return "Connection failed: the selected OpenAI model is unsupported."
-    if isinstance(error, AIRateLimitError):
-        return "Connection failed: OpenAI rate limit reached."
-    if isinstance(error, AIRequestTimeoutError):
-        return "Connection failed: the OpenAI request timed out."
-    if isinstance(error, AIConnectionError):
-        return "Connection failed: OpenAI is offline or unreachable."
-    if isinstance(error, AIProviderServerError):
-        return "Connection failed: OpenAI reported a server failure."
-    if isinstance(error, (AIInvalidResponseError, AIProviderRefusalError)):
-        return "Connection failed: invalid structured response."
-    if isinstance(error, (AIProviderUnavailableError, AIUnsupportedSDKError)):
-        return "Connection failed: OpenAI SDK dependency is unavailable."
-    if isinstance(error, AIInvalidRequestError):
-        return "Connection failed: OpenAI rejected the minimal request."
-    return "Connection failed safely due to an unexpected provider error."
+    return "Connection failed: " + categorize_ai_error(error).user_message
 
 
 def _main_window(gui_module: Any | None) -> Any | None:

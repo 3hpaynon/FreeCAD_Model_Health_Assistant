@@ -24,7 +24,9 @@ MINIMUM_OUTPUT_TOKENS = 64
 MAXIMUM_OUTPUT_TOKENS = 32_000
 MAXIMUM_RETRY_COUNT = 5
 
-SUPPORTED_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high"})
+SUPPORTED_REASONING_EFFORTS = frozenset(
+    {"none", "low", "medium", "high", "xhigh", "max"}
+)
 SUPPORTED_RESPONSE_VERBOSITIES = frozenset({"low", "medium", "high"})
 SUPPORTED_EXPLANATION_MODES = frozenset(
     {"selected-warning", "full-analysis", "custom-question"}

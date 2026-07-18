@@ -15,7 +15,10 @@ from model_health_assistant.ai_context import (
     serialize_ai_request_context,
 )
 from model_health_assistant.ai_models import AIExplanationRequest, AIRequestContext
-from model_health_assistant.ai_prompts import build_ai_explanation_request
+from model_health_assistant.ai_prompts import (
+    build_ai_explanation_request,
+    normalize_grounded_question,
+)
 from model_health_assistant.models import ModelHealthReport
 
 AIRequestType = Literal["selected-warning", "full-analysis", "custom-question"]
@@ -49,6 +52,7 @@ class AIRequestReview:
     request_fingerprint: str
     source_report_fingerprint: str
     selected_warning_identifier: str | None = None
+    user_question: str | None = None
     user_question_included: bool = False
 
     def preview_payload(self) -> dict[str, object]:
@@ -68,6 +72,7 @@ class AIRequestReview:
             "truncated": context.metadata.was_truncated,
             "document_name_included": context.metadata.document_name_included,
             "user_question_included": self.user_question_included,
+            "user_question": self.user_question,
             "privacy_notices": [
                 "No raw CAD file is being sent.",
                 "No CAD geometry is being sent.",
@@ -163,6 +168,10 @@ def build_ai_request_review(
         "custom-question",
     }:
         raise ValueError("unsupported request type")
+    if request_type != "selected-warning" and selected_warning_identifier is not None:
+        raise ValueError(
+            "A selected warning identifier is allowed only for a selected-warning request."
+        )
     if request_type == "selected-warning":
         context = _selected_warning_context(
             report,
@@ -171,12 +180,19 @@ def build_ai_request_review(
         )
     else:
         context = build_ai_request_context(report, limits=limits)
-    request = build_ai_explanation_request(context)
-    user_question_included = bool(
-        isinstance(user_question, str) and user_question.strip()
+    if request_type == "custom-question":
+        normalized_question = normalize_grounded_question(user_question)
+    else:
+        if user_question is not None:
+            raise ValueError(
+                "A user question is allowed only for a custom-question request."
+            )
+        normalized_question = None
+    request = build_ai_explanation_request(
+        context,
+        user_question=normalized_question,
     )
-    if user_question_included:
-        request.user_prompt += "\nUSER QUESTION:\n" + user_question.strip()
+    user_question_included = normalized_question is not None
 
     fingerprint = _request_fingerprint(
         provider_identifier,
@@ -193,6 +209,7 @@ def build_ai_request_review(
         request_fingerprint=fingerprint,
         source_report_fingerprint=_report_fingerprint(report),
         selected_warning_identifier=selected_warning_identifier,
+        user_question=normalized_question,
         user_question_included=user_question_included,
     )
 
