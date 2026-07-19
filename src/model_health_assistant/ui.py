@@ -1615,6 +1615,8 @@ def _start_selected_warning_review(
             report,
             request_type="selected-warning",
             selected_warning_identifier=warning.warning_id,
+            selected_warning_rule_identifier=warning.rule_id,
+            selected_warning_feature_internal_name=warning.feature_internal_name,
         )
     except Exception as exc:
         return _explanation_error_text(exc)
@@ -1637,6 +1639,10 @@ def _start_selected_warning_review(
                 consent,
                 current_report,
                 selected_warning_identifier=current_warning.warning_id,
+                selected_warning_rule_identifier=current_warning.rule_id,
+                selected_warning_feature_internal_name=(
+                    current_warning.feature_internal_name
+                ),
             )
         except Exception as exc:
             return _explanation_error_text(exc)

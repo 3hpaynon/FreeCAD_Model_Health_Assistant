@@ -15,6 +15,7 @@ from model_health_assistant.ai_provider import (
     AIInvalidRequestError,
     AIInvalidResponseError,
     AIMissingCredentialError,
+    AIOutputLimitError,
     AIPermissionError,
     AIProviderRefusalError,
     AIProviderServerError,
@@ -46,6 +47,7 @@ _RAW_SECRET = "sk-this-secret-must-never-escape"
         (AIRequestTimeoutError(_RAW_SECRET), "timeout", True),
         (AIProviderServerError(_RAW_SECRET), "provider_server_error", True),
         (AIProviderRefusalError(_RAW_SECRET), "provider_refusal", False),
+        (AIOutputLimitError(_RAW_SECRET), "output_limit_reached", False),
         (
             AIInvalidResponseError(_RAW_SECRET),
             "malformed_structured_response",

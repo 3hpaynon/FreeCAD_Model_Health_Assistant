@@ -25,6 +25,7 @@ from model_health_assistant.ai_provider import (
     AIInvalidRequestError,
     AIInvalidResponseError,
     AIMissingCredentialError,
+    AIOutputLimitError,
     AIPermissionError,
     AIProviderRefusalError,
     AIProviderServerError,
@@ -256,12 +257,10 @@ def test_request_translation_is_deterministic_minimal_and_non_storing() -> None:
     assert first["parallel_tool_calls"] is False
     assert first["reasoning"] == {"effort": "low"}
     assert first["text"]["verbosity"] == "medium"
-    assert first["text"]["format"] == {
-        "type": "json_schema",
-        "name": "model_health_explanation",
-        "strict": True,
-        "schema": OPENAI_EXPLANATION_RESPONSE_SCHEMA,
-    }
+    assert first["text"]["format"]["type"] == "json_schema"
+    assert first["text"]["format"]["name"] == "model_health_explanation"
+    assert first["text"]["format"]["strict"] is True
+    assert first["text"]["format"]["schema"]["type"] == "object"
     assert set(first["metadata"]) == {
         "application",
         "purpose",
@@ -277,6 +276,37 @@ def test_request_translation_is_deterministic_minimal_and_non_storing() -> None:
         "include",
     }.isdisjoint(first)
     assert _TEST_CREDENTIAL not in json.dumps(first, sort_keys=True)
+
+
+def test_request_schema_constrains_selected_warning_identity_exactly() -> None:
+    request = _request(1)
+    responses = _FakeResponses(response=_response_for(request))
+
+    _provider_with_responses(responses).explain(request)
+
+    schema = responses.calls[0]["text"]["format"]["schema"]
+    warning_properties = schema["properties"]["warning_explanations"]["items"][
+        "properties"
+    ]
+    warning = request.context.warnings[0]
+    assert warning_properties["warning_id"]["enum"] == [warning.warning_id]
+    assert warning_properties["rule_id"]["enum"] == [warning.rule_id]
+    assert warning_properties["affected_feature_internal_name"]["enum"] == [
+        warning.affected_feature_internal_name
+    ]
+    assert warning_properties["severity"]["enum"] == [warning.severity]
+    base_properties = OPENAI_EXPLANATION_RESPONSE_SCHEMA["properties"][
+        "warning_explanations"
+    ]["items"]["properties"]
+    assert all(
+        "enum" not in base_properties[field_name]
+        for field_name in (
+            "warning_id",
+            "rule_id",
+            "affected_feature_internal_name",
+            "severity",
+        )
+    )
 
 
 @pytest.mark.parametrize("warning_count", [1, 3])
@@ -478,6 +508,31 @@ def test_malformed_json_is_rejected_without_echoing_raw_output() -> None:
 
     assert "RAW PRIVATE" not in str(captured.value)
     assert captured.value.__context__ is None
+
+
+@pytest.mark.parametrize("reason", ["max_output_tokens", "max_tokens"])
+def test_incomplete_output_limit_has_an_actionable_controlled_error(
+    reason: str,
+) -> None:
+    response = _response_for(_request())
+    response.status = "incomplete"
+    response.incomplete_details = SimpleNamespace(reason=reason)
+    response.output_text = "{PRIVATE PARTIAL PROVIDER OUTPUT"
+
+    with pytest.raises(AIOutputLimitError) as captured:
+        _provider_with_responses(_FakeResponses(response=response)).explain(_request())
+
+    assert "PRIVATE PARTIAL" not in str(captured.value)
+    assert captured.value.__context__ is None
+
+
+def test_other_incomplete_response_remains_a_controlled_invalid_response() -> None:
+    response = _response_for(_request())
+    response.status = "incomplete"
+    response.incomplete_details = SimpleNamespace(reason="provider_internal_reason")
+
+    with pytest.raises(AIInvalidResponseError, match="incomplete structured"):
+        _provider_with_responses(_FakeResponses(response=response)).explain(_request())
 
 
 def test_unknown_warning_identity_is_rejected() -> None:

@@ -37,6 +37,10 @@ class AIInvalidResponseError(AIProviderError):
     """Raised when provider output does not satisfy the response contract."""
 
 
+class AIOutputLimitError(AIInvalidResponseError):
+    """Raised when a provider stops before completing structured output."""
+
+
 class AIRequestTimeoutError(AIProviderError):
     """Reserved for a future provider request that exceeds its time limit."""
 
@@ -147,6 +151,7 @@ __all__ = [
     "AIDependencyMissingError",
     "AIExplanationProvider",
     "AIInvalidResponseError",
+    "AIOutputLimitError",
     "AIInvalidRequestError",
     "AIMissingCredentialError",
     "AIPermissionError",

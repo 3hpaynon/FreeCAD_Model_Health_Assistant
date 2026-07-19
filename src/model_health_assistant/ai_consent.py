@@ -40,6 +40,10 @@ class AIConsentAlreadyUsedError(AIConsentError):
     """Raised when one-request consent is reused."""
 
 
+class AISelectedWarningError(AIConsentError):
+    """Raised when a selected warning cannot be identified unambiguously."""
+
+
 @dataclass(frozen=True, slots=True)
 class AIRequestReview:
     """Exact provider-neutral request plus privacy metadata shown to the user."""
@@ -52,6 +56,8 @@ class AIRequestReview:
     request_fingerprint: str
     source_report_fingerprint: str
     selected_warning_identifier: str | None = None
+    selected_warning_rule_identifier: str | None = None
+    selected_warning_feature_internal_name: str | None = None
     user_question: str | None = None
     user_question_included: bool = False
 
@@ -124,6 +130,8 @@ class AIRequestConsent:
         current_report: ModelHealthReport,
         *,
         selected_warning_identifier: str | None = None,
+        selected_warning_rule_identifier: str | None = None,
+        selected_warning_feature_internal_name: str | None = None,
     ) -> AIExplanationRequest:
         if self._used:
             raise AIConsentAlreadyUsedError("Request consent has already been used.")
@@ -135,6 +143,10 @@ class AIRequestConsent:
             self.review,
             current_report,
             selected_warning_identifier=selected_warning_identifier,
+            selected_warning_rule_identifier=selected_warning_rule_identifier,
+            selected_warning_feature_internal_name=(
+                selected_warning_feature_internal_name
+            ),
         )
         self._used = True
         return self.review.request
@@ -148,6 +160,8 @@ def build_ai_request_review(
     model_identifier: str,
     request_type: AIRequestType,
     selected_warning_identifier: str | None = None,
+    selected_warning_rule_identifier: str | None = None,
+    selected_warning_feature_internal_name: str | None = None,
     user_question: str | None = None,
     limits: AIContextLimits = DEFAULT_AI_CONTEXT_LIMITS,
 ) -> AIRequestReview:
@@ -168,14 +182,23 @@ def build_ai_request_review(
         "custom-question",
     }:
         raise ValueError("unsupported request type")
-    if request_type != "selected-warning" and selected_warning_identifier is not None:
+    selected_warning_values = (
+        selected_warning_identifier,
+        selected_warning_rule_identifier,
+        selected_warning_feature_internal_name,
+    )
+    if request_type != "selected-warning" and any(
+        value is not None for value in selected_warning_values
+    ):
         raise ValueError(
-            "A selected warning identifier is allowed only for a selected-warning request."
+            "A selected warning identity is allowed only for a selected-warning request."
         )
     if request_type == "selected-warning":
         context = _selected_warning_context(
             report,
             selected_warning_identifier,
+            selected_warning_rule_identifier,
+            selected_warning_feature_internal_name,
             limits,
         )
     else:
@@ -209,6 +232,10 @@ def build_ai_request_review(
         request_fingerprint=fingerprint,
         source_report_fingerprint=_report_fingerprint(report),
         selected_warning_identifier=selected_warning_identifier,
+        selected_warning_rule_identifier=selected_warning_rule_identifier,
+        selected_warning_feature_internal_name=(
+            selected_warning_feature_internal_name
+        ),
         user_question=normalized_question,
         user_question_included=user_question_included,
     )
@@ -219,6 +246,8 @@ def validate_review_is_current(
     current_report: ModelHealthReport,
     *,
     selected_warning_identifier: str | None = None,
+    selected_warning_rule_identifier: str | None = None,
+    selected_warning_feature_internal_name: str | None = None,
 ) -> None:
     """Reject stale report, selection, or in-memory request state."""
 
@@ -228,7 +257,17 @@ def validate_review_is_current(
         raise AIConsentInvalidatedError(
             "The analyzed report changed after preview; review it again."
         )
-    if selected_warning_identifier != review.selected_warning_identifier:
+    current_selection = (
+        selected_warning_identifier,
+        selected_warning_rule_identifier,
+        selected_warning_feature_internal_name,
+    )
+    reviewed_selection = (
+        review.selected_warning_identifier,
+        review.selected_warning_rule_identifier,
+        review.selected_warning_feature_internal_name,
+    )
+    if current_selection != reviewed_selection:
         raise AIConsentInvalidatedError(
             "The selected warning changed after preview; review it again."
         )
@@ -247,19 +286,46 @@ def validate_review_is_current(
 def _selected_warning_context(
     report: ModelHealthReport,
     selected_warning_identifier: str | None,
+    selected_warning_rule_identifier: str | None,
+    selected_warning_feature_internal_name: str | None,
     limits: AIContextLimits,
 ) -> AIRequestContext:
     if not isinstance(selected_warning_identifier, str) or not (
         selected_warning_identifier.strip()
     ):
-        raise ValueError("a selected warning identifier is required")
+        raise AISelectedWarningError("A selected warning identifier is required.")
+    for value, message in (
+        (
+            selected_warning_rule_identifier,
+            "The selected warning rule identifier is invalid.",
+        ),
+        (
+            selected_warning_feature_internal_name,
+            "The selected warning feature identifier is invalid.",
+        ),
+    ):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise AISelectedWarningError(message)
     matches = [
         warning
         for warning in report.warnings
-        if warning.warning_id == selected_warning_identifier
+        if (
+            warning.warning_id == selected_warning_identifier
+            and (
+                selected_warning_rule_identifier is None
+                or warning.rule_id == selected_warning_rule_identifier
+            )
+            and (
+                selected_warning_feature_internal_name is None
+                or warning.affected_feature_name
+                == selected_warning_feature_internal_name
+            )
+        )
     ]
     if len(matches) != 1:
-        raise ValueError("the selected warning is missing or ambiguous")
+        raise AISelectedWarningError(
+            "The selected warning is missing or ambiguous; select it again."
+        )
     scoped_report = ModelHealthReport(
         document_name=report.document_name,
         generated_at=report.generated_at,
@@ -331,6 +397,7 @@ __all__ = [
     "AIRequestConsent",
     "AIRequestReview",
     "AIRequestType",
+    "AISelectedWarningError",
     "build_ai_request_review",
     "validate_review_is_current",
 ]

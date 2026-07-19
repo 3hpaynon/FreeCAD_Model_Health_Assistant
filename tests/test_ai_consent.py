@@ -77,7 +77,7 @@ def test_preview_displays_all_required_metadata_and_exact_request_context() -> N
     assert payload["model_identifier"] == "gpt-5.6-terra"
     assert payload["request_type"] == "full-analysis"
     assert payload["context_schema_version"] == "1.0"
-    assert payload["prompt_template_version"] == "model-health-explanation-v2"
+    assert payload["prompt_template_version"] == "model-health-explanation-v3"
     assert payload["included_warning_count"] == 2
     assert payload["omitted_warning_count"] == 0
     assert payload["truncated"] is False
@@ -158,6 +158,37 @@ def test_selected_warning_change_invalidates_consent_and_scope_is_minimal() -> N
     assert review.request.context.metadata.omitted_warning_count == 2
     with pytest.raises(AIConsentInvalidatedError, match="selected warning changed"):
         consent.consume(report, selected_warning_identifier="WARN-003")
+
+
+def test_selected_warning_uses_composite_identity_when_rule_ids_repeat() -> None:
+    report = _report(2)
+    for warning in report.warnings:
+        warning.warning_id = "MHA-SKETCH-SUPPORT-UNKNOWN-001"
+        warning.rule_id = "unknown_sketch_support"
+
+    review = build_ai_request_review(
+        report,
+        provider_identifier="openai",
+        provider_display_name="OpenAI",
+        model_identifier="gpt-5.6-terra",
+        request_type="selected-warning",
+        selected_warning_identifier="MHA-SKETCH-SUPPORT-UNKNOWN-001",
+        selected_warning_rule_identifier="unknown_sketch_support",
+        selected_warning_feature_internal_name="Feature002",
+    )
+    consent = AIRequestConsent(review)
+    consent.approve()
+
+    assert [
+        warning.affected_feature_internal_name
+        for warning in review.request.context.warnings
+    ] == ["Feature002"]
+    assert consent.consume(
+        report,
+        selected_warning_identifier="MHA-SKETCH-SUPPORT-UNKNOWN-001",
+        selected_warning_rule_identifier="unknown_sketch_support",
+        selected_warning_feature_internal_name="Feature002",
+    ) is review.request
 
 
 def test_truncation_and_omissions_are_displayed() -> None:

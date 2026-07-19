@@ -79,6 +79,8 @@ def test_system_instruction_marks_cad_text_untrusted_and_limits_claims() -> None
     assert "do not claim that omitted material was analyzed" in instruction
     assert "highest-priority concerns" in instruction
     assert "interactions only when" in instruction
+    assert "copy warning_id, rule_id, affected_feature_internal_name" in instruction
+    assert "preserve spelling, capitalization, punctuation" in instruction
 
 
 def test_prompt_has_json_delimiters_and_template_version() -> None:
@@ -87,7 +89,7 @@ def test_prompt_has_json_delimiters_and_template_version() -> None:
     assert request.user_prompt.splitlines()[0] == MODEL_CONTEXT_BEGIN_DELIMITER
     assert request.user_prompt.splitlines()[-1] == MODEL_CONTEXT_END_DELIMITER
     assert request.metadata.prompt_template_version == AI_PROMPT_TEMPLATE_VERSION
-    assert AI_PROMPT_TEMPLATE_VERSION == "model-health-explanation-v2"
+    assert AI_PROMPT_TEMPLATE_VERSION == "model-health-explanation-v3"
     assert json.loads(_payload_json(request.user_prompt))["warnings"] == []
 
 

@@ -21,6 +21,7 @@ from model_health_assistant.ai_provider import (
     AIInvalidRequestError,
     AIInvalidResponseError,
     AIMissingCredentialError,
+    AIOutputLimitError,
     AIPermissionError,
     AIProviderRefusalError,
     AIProviderServerError,
@@ -44,6 +45,7 @@ AIErrorCategory = Literal[
     "timeout",
     "provider_server_error",
     "provider_refusal",
+    "output_limit_reached",
     "malformed_structured_response",
     "dependency_missing",
     "cancelled_request",
@@ -116,6 +118,12 @@ _CATEGORY_RESULTS: dict[AIErrorCategory, AIErrorCategoryResult] = {
         "The provider declined to produce the requested answer.",
         False,
     ),
+    "output_limit_reached": AIErrorCategoryResult(
+        "output_limit_reached",
+        "The provider reached the configured output-token limit before the "
+        "structured response was complete. Increase Maximum output and try again.",
+        False,
+    ),
     "malformed_structured_response": AIErrorCategoryResult(
         "malformed_structured_response",
         "The provider returned malformed or invalid structured output.",
@@ -164,6 +172,7 @@ def categorize_ai_error(error: BaseException) -> AIErrorCategoryResult:
         (AIRequestTimeoutError, "timeout"),
         (AIProviderServerError, "provider_server_error"),
         (AIProviderRefusalError, "provider_refusal"),
+        (AIOutputLimitError, "output_limit_reached"),
         (AIInvalidResponseError, "malformed_structured_response"),
         (AIDependencyMissingError, "dependency_missing"),
         (AIUnsupportedSDKError, "dependency_missing"),

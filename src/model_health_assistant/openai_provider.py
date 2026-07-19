@@ -34,6 +34,7 @@ from model_health_assistant.ai_provider import (
     AIInvalidRequestError,
     AIInvalidResponseError,
     AIMissingCredentialError,
+    AIOutputLimitError,
     AIPermissionError,
     AIProviderError,
     AIProviderRefusalError,
@@ -62,7 +63,7 @@ DEFAULT_OPENAI_CONNECT_TIMEOUT_SECONDS = 10
 DEFAULT_OPENAI_READ_TIMEOUT_SECONDS = 45
 DEFAULT_OPENAI_REQUEST_TIMEOUT_SECONDS = 60
 DEFAULT_OPENAI_MAXIMUM_RETRIES = 2
-DEFAULT_OPENAI_MAXIMUM_OUTPUT_TOKENS = 1200
+DEFAULT_OPENAI_MAXIMUM_OUTPUT_TOKENS = 8_192
 DEFAULT_OPENAI_REASONING_EFFORT = "low"
 DEFAULT_OPENAI_RESPONSE_VERBOSITY = "medium"
 OPENAI_RETRY_POLICY_OWNER = "openai-sdk"
@@ -302,6 +303,7 @@ class OpenAIExplanationProvider:
                 "OpenAI declined the minimal connection test.",
                 request_identifier=request_identifier,
             )
+        _raise_for_incomplete_response(sdk_response)
         payload = _structured_payload(
             getattr(sdk_response, "output_text", None),
             "connection test",
@@ -491,7 +493,7 @@ class OpenAIExplanationProvider:
                 "type": "json_schema",
                 "name": "model_health_explanation",
                 "strict": True,
-                "schema": deepcopy(OPENAI_EXPLANATION_RESPONSE_SCHEMA),
+                "schema": _explanation_response_schema(request),
             },
         }
         if options.response_verbosity is not None:
@@ -532,6 +534,7 @@ class OpenAIExplanationProvider:
                 "OpenAI declined to produce the requested explanation.",
                 request_identifier=request_identifier,
             )
+        _raise_for_incomplete_response(sdk_response)
 
         output_text = getattr(sdk_response, "output_text", None)
         if not isinstance(output_text, str) or not output_text.strip():
@@ -589,6 +592,32 @@ def _provider_input(request: AIExplanationRequest) -> object:
             ],
         },
     ]
+
+
+def _explanation_response_schema(
+    request: AIExplanationRequest,
+) -> dict[str, object]:
+    """Constrain provider-owned text to exact source-warning identities."""
+
+    schema = deepcopy(OPENAI_EXPLANATION_RESPONSE_SCHEMA)
+    warning_properties = schema["properties"]["warning_explanations"]["items"][
+        "properties"
+    ]
+    for field_name in (
+        "warning_id",
+        "rule_id",
+        "affected_feature_internal_name",
+        "severity",
+    ):
+        allowed_values = list(
+            dict.fromkeys(
+                getattr(warning, field_name)
+                for warning in request.context.warnings
+            )
+        )
+        if allowed_values:
+            warning_properties[field_name]["enum"] = allowed_values
+    return schema
 
 
 def _response_create_method(client: object) -> Callable[..., object]:
@@ -744,6 +773,22 @@ def _response_contains_refusal(response: object) -> bool:
         if any(getattr(part, "type", None) == "refusal" for part in content):
             return True
     return False
+
+
+def _raise_for_incomplete_response(response: object) -> None:
+    """Distinguish token exhaustion from malformed completed output."""
+
+    if getattr(response, "status", None) != "incomplete":
+        return
+    details = getattr(response, "incomplete_details", None)
+    reason = _optional_text(getattr(details, "reason", None))
+    if reason in {"max_output_tokens", "max_tokens"}:
+        raise AIOutputLimitError(
+            "OpenAI reached the configured output-token limit."
+        )
+    raise AIInvalidResponseError(
+        "OpenAI returned an incomplete structured response."
+    )
 
 
 def _map_sdk_error(error: Exception, sdk_module: ModuleType | None) -> AIProviderError:

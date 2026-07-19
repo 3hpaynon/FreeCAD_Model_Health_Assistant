@@ -166,6 +166,37 @@ def test_selected_warning_local_mock_executes_only_exact_reviewed_warning() -> N
     assert report.to_dict() == before
 
 
+def test_selected_warning_workflow_disambiguates_repeated_rule_warning_ids() -> None:
+    report = _report()
+    for warning in report.warnings:
+        warning.warning_id = "MHA-SKETCH-SUPPORT-UNKNOWN-001"
+        warning.rule_id = "unknown_sketch_support"
+    workflow = AIExplanationWorkflow(lambda: ProviderSettings())
+    selection = {
+        "selected_warning_identifier": "MHA-SKETCH-SUPPORT-UNKNOWN-001",
+        "selected_warning_rule_identifier": "unknown_sketch_support",
+        "selected_warning_feature_internal_name": "Pocket001",
+    }
+
+    review = workflow.build_review(
+        report,
+        request_type="selected-warning",
+        **selection,
+    )
+    consent = AIRequestConsent(review)
+    consent.approve()
+    response = workflow.execute_review(consent, report, **selection)
+
+    assert [
+        warning.affected_feature_internal_name
+        for warning in review.request.context.warnings
+    ] == ["Pocket001"]
+    assert [
+        warning.affected_feature_internal_name
+        for warning in response.warning_explanations
+    ] == ["Pocket001"]
+
+
 def test_selected_warning_requires_explicit_unused_consent() -> None:
     report = _report()
     workflow = AIExplanationWorkflow(lambda: ProviderSettings())

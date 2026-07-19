@@ -254,6 +254,8 @@ class AIExplanationWorkflow:
         *,
         request_type: AIRequestType,
         selected_warning_identifier: str | None = None,
+        selected_warning_rule_identifier: str | None = None,
+        selected_warning_feature_internal_name: str | None = None,
         user_question: str | None = None,
     ) -> AIRequestReview:
         """Build an exact review for the currently ready provider and model."""
@@ -271,6 +273,10 @@ class AIExplanationWorkflow:
             model_identifier=status.model_identifier,
             request_type=request_type,
             selected_warning_identifier=selected_warning_identifier,
+            selected_warning_rule_identifier=selected_warning_rule_identifier,
+            selected_warning_feature_internal_name=(
+                selected_warning_feature_internal_name
+            ),
             user_question=user_question,
         )
 
@@ -280,6 +286,8 @@ class AIExplanationWorkflow:
         current_report: ModelHealthReport,
         *,
         selected_warning_identifier: str | None = None,
+        selected_warning_rule_identifier: str | None = None,
+        selected_warning_feature_internal_name: str | None = None,
     ) -> AIExplanationResponse:
         """Consume one approved review and execute that exact request once."""
 
@@ -287,6 +295,10 @@ class AIExplanationWorkflow:
             consent,
             current_report,
             selected_warning_identifier=selected_warning_identifier,
+            selected_warning_rule_identifier=selected_warning_rule_identifier,
+            selected_warning_feature_internal_name=(
+                selected_warning_feature_internal_name
+            ),
         ).execute()
 
     def prepare_execution(
@@ -295,6 +307,8 @@ class AIExplanationWorkflow:
         current_report: ModelHealthReport,
         *,
         selected_warning_identifier: str | None = None,
+        selected_warning_rule_identifier: str | None = None,
+        selected_warning_feature_internal_name: str | None = None,
     ) -> AIExecutionPlan:
         """Consume consent and freeze provider/request state on the GUI thread."""
 
@@ -322,6 +336,10 @@ class AIExplanationWorkflow:
         request = consent.consume(
             current_report,
             selected_warning_identifier=selected_warning_identifier,
+            selected_warning_rule_identifier=selected_warning_rule_identifier,
+            selected_warning_feature_internal_name=(
+                selected_warning_feature_internal_name
+            ),
         )
         return AIExecutionPlan(
             request_type=review.request_type,
