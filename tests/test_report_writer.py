@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from model_health_assistant.models import FeatureInfo, ModelHealthReport, RiskWarning
 from model_health_assistant.report_writer import (
     build_report_path,
@@ -176,3 +178,15 @@ def test_save_and_load_report_json(tmp_path) -> None:
         "starting_score": 100,
         "final_score": 90,
     }
+
+
+def test_report_writer_rejects_arbitrary_mapping_before_creating_a_file(
+    tmp_path,
+) -> None:
+    output_path = tmp_path / "reports" / "unsafe.json"
+    untrusted_mapping = {"api_key": "UNIT_TEST_SECRET_DO_NOT_LOG"}
+
+    with pytest.raises(TypeError, match="ModelHealthReport"):
+        save_report_json(untrusted_mapping, output_path)
+
+    assert output_path.exists() is False

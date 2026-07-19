@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any
-
 from model_health_assistant.models import ModelHealthReport
 
 
@@ -39,22 +37,20 @@ def build_report_path(
     )
 
 
-def report_to_dict(report: ModelHealthReport | dict[str, Any]) -> dict[str, Any]:
-    """Convert a report object into the local JSON report shape."""
+def report_to_dict(report: ModelHealthReport) -> dict[str, object]:
+    """Convert only the typed local report into its allowlisted JSON shape."""
 
     if isinstance(report, ModelHealthReport):
         return report.to_dict()
-    if isinstance(report, dict):
-        return dict(report)
-    raise TypeError("report must be a ModelHealthReport or dictionary")
+    raise TypeError("report must be a ModelHealthReport")
 
 
-def save_report_json(report: ModelHealthReport | dict[str, Any], output_path: str | Path) -> Path:
-    """Save a local JSON report and return the final path."""
+def save_report_json(report: ModelHealthReport, output_path: str | Path) -> Path:
+    """Save one typed local report and return the final path."""
 
+    report_dict = report_to_dict(report)
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    report_dict = report_to_dict(report)
     path.write_text(json.dumps(report_dict, indent=2) + "\n", encoding="utf-8")
     return path
 

@@ -1932,12 +1932,43 @@ def _selected_explanation_succeeded(
     from model_health_assistant.ai_result_presentation import (
         format_selected_warning_explanation,
     )
+    from model_health_assistant.ai_traceability import (
+        build_ai_response_traceability,
+    )
 
     try:
+        from model_health_assistant.ai_consent import AIConsentInvalidatedError
+
+        current_report = controller.report
+        current_warning = controller.current_selected_warning()
+        if current_report is None or current_warning is None:
+            raise AIConsentInvalidatedError(
+                "The report or selected warning changed while the provider request "
+                "was running. Refresh and review a new request."
+            )
+        target_error = _validate_selected_warning_snapshot(
+            controller.document_context,
+            current_warning,
+        )
+        if target_error:
+            raise AIConsentInvalidatedError(
+                target_error + " Refresh and review a new request."
+            )
+        traceability = build_ai_response_traceability(
+            review,
+            response,
+            current_report,
+            selected_warning_identifier=current_warning.warning_id,
+            selected_warning_rule_identifier=current_warning.rule_id,
+            selected_warning_feature_internal_name=(
+                current_warning.feature_internal_name
+            ),
+        )
         text = format_selected_warning_explanation(
             response,
             source_warning,
             review,
+            traceability=traceability,
         )
     except Exception as exc:
         _explanation_failed(
@@ -1975,9 +2006,29 @@ def _full_explanation_succeeded(
     from model_health_assistant.ai_result_presentation import (
         format_full_analysis_explanation,
     )
+    from model_health_assistant.ai_traceability import (
+        build_ai_response_traceability,
+    )
 
     try:
-        text = format_full_analysis_explanation(response, review)
+        from model_health_assistant.ai_consent import AIConsentInvalidatedError
+
+        current_report = controller.report
+        if current_report is None:
+            raise AIConsentInvalidatedError(
+                "The completed report changed while the provider request was "
+                "running. Refresh and review a new request."
+            )
+        traceability = build_ai_response_traceability(
+            review,
+            response,
+            current_report,
+        )
+        text = format_full_analysis_explanation(
+            response,
+            review,
+            traceability=traceability,
+        )
     except Exception as exc:
         _explanation_failed(
             controller,
@@ -2014,9 +2065,29 @@ def _custom_question_succeeded(
     from model_health_assistant.ai_result_presentation import (
         format_grounded_question_response,
     )
+    from model_health_assistant.ai_traceability import (
+        build_ai_response_traceability,
+    )
 
     try:
-        text = format_grounded_question_response(response, review)
+        from model_health_assistant.ai_consent import AIConsentInvalidatedError
+
+        current_report = controller.report
+        if current_report is None:
+            raise AIConsentInvalidatedError(
+                "The completed report changed while the provider request was "
+                "running. Refresh and review a new question."
+            )
+        traceability = build_ai_response_traceability(
+            review,
+            response,
+            current_report,
+        )
+        text = format_grounded_question_response(
+            response,
+            review,
+            traceability=traceability,
+        )
     except Exception as exc:
         _explanation_failed(
             controller,

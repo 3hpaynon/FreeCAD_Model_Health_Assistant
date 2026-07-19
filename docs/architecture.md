@@ -1,98 +1,70 @@
 # Model Health Assistant Architecture
 
-Model Health Assistant is designed as a local-first FreeCAD workbench. The
-current pre-API milestone provides feature-tree extraction, deterministic risk
-analysis, local JSON reporting, a native FreeCAD results interface, and a
-provider-neutral explanation foundation exercised only by a deterministic local
-mock provider. No AI model, API key, provider SDK, or network request is used.
+Model Health Assistant is a local-first FreeCAD workbench with an optional,
+explicitly consented AI explanation branch. Deterministic extraction, risk
+rules, scoring, and local reporting remain independent of provider packages,
+credentials, and network availability.
 
-## Local System Flow
+## End-to-End System Flow
 
 ```text
 FreeCAD document
--> local extractor
--> feature/dependency graph
--> local risk engine
--> completed report object
-   -> local JSON report writer
-   -> UI-neutral presentation data
-      -> Report View and native results dialog
-   -> explicit allowlist and deterministic limits
-      -> AIRequestContext 1.0
-      -> versioned provider-neutral explanation request
-      -> injected LocalMockAIProvider
-      -> validated AIExplanationResponse 1.0
-      -> read-only local mock explanation dialog
+  -> local extractor
+  -> immutable-style Python fact snapshot
+  -> deterministic risk engine and health score
+  -> ModelHealthReport (report schema 0.3)
+     -> typed local JSON writer
+     -> UI-neutral analysis presentation
+        -> FreeCAD Report View and results dialog
+     -> explicit user AI action
+        -> allowlisted AIRequestContext (schema 1.0)
+        -> deterministic size/truncation controls
+        -> versioned provider-neutral request (schema 1.0)
+        -> final payload preview and one-request consent
+        -> request-time provider/credential snapshot
+        -> asynchronous provider-neutral execution
+           -> LocalMockAIProvider, or
+           -> OpenAI adapter
+              -> short-lived client and secure credential retrieval
+              -> Responses API, strict structured output, tools disabled
+        -> provider-neutral AIExplanationResponse (schema 1.0)
+        -> response validation and source-warning grounding
+        -> completion-time report/selection/fingerprint validation
+        -> read-only traceable explanation display
 ```
 
-## Version 0.2 Components
+The OpenAI route never receives a live FreeCAD document, report file/path, or
+credential through the provider-neutral request.
 
-### FreeCAD Entry Points
+## Local Analysis Branch
 
-FreeCAD loads the addon through root-level `Init.py` and `InitGui.py` files.
-`Init.py` exposes the local `src` directory on `sys.path` so the package can be
-used directly from FreeCAD's addon directory without an installation step.
+### FreeCAD entry points
 
-`InitGui.py` remains deliberately minimal. It defines
-`ModelHealthAssistantWorkbench`, registers the stable internal command ID
-`MHA_TestCommand`, and adds it to the workbench menu and toolbar. The local
-command wrapper imports and delegates activation to
-`model_health_assistant.ui.run_analysis_command`; it contains no extraction,
-risk, report, or dialog-construction logic.
+FreeCAD discovers the addon through root-level `Init.py` and `InitGui.py`.
+`Init.py` resolves the addon root and exposes `src` on `sys.path`. `InitGui.py`
+registers `ModelHealthAssistantWorkbench`, the stable analysis command
+`MHA_TestCommand`, and the provider-settings command `MHA_ProviderSettings`.
 
-### Extractor
+The entry points contain no credential storage, prompt construction, OpenAI SDK
+import, or provider call. Optional dependencies are not imported and credentials
+are not retrieved during workbench discovery.
 
-`model_health_assistant.extractor` is responsible for reading the active FreeCAD
-document when FreeCAD is available. It collects a defensive snapshot of document
-objects, including names, labels, type IDs, dependency relationships, sketch
-support, and best-effort recompute/error status.
+### Extraction and report models
 
-The extractor is intentionally cautious. It uses `getattr()` heavily so the
-module can be imported and tested outside FreeCAD.
+`extractor.py` reads the active FreeCAD document defensively and creates pure
+Python `FeatureInfo` facts. `models.py` owns `FeatureInfo`, `SketchInfo`,
+`DependencyInfo`, `RiskWarning`, and `ModelHealthReport`. No network or AI code
+is involved.
 
-### Data Models
+The extractor captures structured names, labels, type/category, dependency
+relationships, sketch support, and confirmed recompute/error facts. It treats
+missing FreeCAD metadata conservatively rather than inventing values.
 
-`model_health_assistant.models` contains pure Python dataclasses:
+### Risk engine and score
 
-- `FeatureInfo`
-- `SketchInfo`
-- `DependencyInfo`
-- `RiskWarning`
-- `ModelHealthReport`
-
-These classes are the shared contract between extraction, analysis, reporting,
-and presentation layers.
-
-### Presentation Layer
-
-`model_health_assistant.presentation` contains FreeCAD- and Qt-independent
-dataclasses `AnalysisPresentation` and `WarningDisplayItem`. It converts an
-already completed `ModelHealthReport` into stable display data without rerunning
-rules, recalculating the health score, parsing warning messages, or mutating the
-report. Warning ordering and counts come from structured report fields. Feature
-evidence and raw penalty values are copied only when exact structured matches
-exist.
-
-### Risk Engine
-
-`model_health_assistant.risk_engine` runs deterministic local rules. Version 0.2
-includes rules for:
-
-- Sketches attached to generated geometry
-- Underdefined sketch metadata when available
-- Recompute/error placeholder status
-- Early fillets or chamfers with downstream dependents
-- High downstream dependency counts
-- Missing or unknown sketch support
-- Future hardcoded/repeated dimension metadata
-
-The risk engine does not use AI, machine learning, cloud calls, or servers.
-
-### Health Score
-
-The health score is a versioned deterministic heuristic. Formula version 1.0
-starts at 100 and applies the following reviewed penalties after warning
-deduplication:
+`risk_engine.py` is the only source of local findings, severity, deduplication,
+and score penalties. Formula version `1.0` starts at 100, applies reviewed rule
+penalties and a bounded prevalence term, then clamps to 0-100.
 
 | Rule ID | Penalty per affected feature | Rule cap |
 | --- | ---: | ---: |
@@ -104,217 +76,309 @@ deduplication:
 | `unknown_sketch_support` | 0 | 0 |
 | `hardcoded_repeated_dimensions` | 0 | 0 |
 
-Unrecognized future rules receive zero points until an explicit weight is
-reviewed. This prevents a new warning from silently changing score semantics.
+Unrecognized rules have zero score impact until explicitly reviewed. The report
+retains the complete score breakdown.
 
-Let `N` be the number of sketches plus additive, subtractive, finishing, and
-pattern features. Let `A` be the number of unique features affected by rules
-with nonzero penalties. The bounded prevalence penalty is:
+### Typed local report boundary
+
+`report_writer.py` accepts only `ModelHealthReport`; arbitrary dictionaries are
+rejected before a file is created. It writes local report schema `0.3`. Provider
+settings, credentials, AI context, prompts, responses, usage, and report paths
+are not fields of `ModelHealthReport` and cannot enter normal report
+serialization through the writer.
+
+The report contains structured model facts but no raw geometry. Legacy
+`document_name`, `timestamp`, and `total_feature_count` aliases remain for report
+consumers.
+
+### Local presentation
+
+`presentation.py` converts a completed report into `AnalysisPresentation` and
+`WarningDisplayItem` without rerunning analysis or mutating the report.
+`ui.py` owns the native results dialog, feature selection, report-folder/path
+actions, and manual refresh. Feature selection resolves the analyzed document
+and structured internal object name before using `FreeCADGui.Selection`; it does
+not change model properties.
+
+## Optional Dependency Boundary
+
+`runtime_dependencies.py` calculates and lazily appends an existing user-owned
+ABI-specific directory:
 
 ```text
-min(10, floor((10 * A / max(1, N)) + 0.5))
+%APPDATA%\FreeCAD\ModelHealthAssistantDependencies\py<major><minor>-<architecture>
 ```
 
-The final score is:
+It never creates the directory, installs packages, prepends it ahead of
+FreeCAD's built-ins, or modifies the FreeCAD installation. The pinned optional
+dependency set is `openai==2.45.0` and `keyring==25.7.0`.
 
-```text
-clamp(100 - applied rule penalties - prevalence penalty, 0, 100)
-```
+`ai_capabilities.py` reports missing SDK/package/backend states without importing
+optional dependencies during workbench discovery. Missing or broken real-AI
+dependencies do not disable local analysis or the mock provider.
 
-Fixed rule penalties ensure confirmed errors are not diluted in large models.
-The bounded prevalence term makes widespread issues matter more in small models
-without allowing model size to dominate. Reports preserve the complete
-calculation under `health_score_breakdown`, including per-warning raw penalties,
-per-rule caps, affected-feature coverage, total penalty, and final score.
+## Credential Boundary
 
-### Report Writer
+`credentials.py` defines the provider-neutral credential protocol and
+`ProviderCredentialStore`. Stable identifiers are:
 
-`model_health_assistant.report_writer` writes indented JSON reports to local
-storage. Report schema 0.3 adds explicit, machine-readable context while keeping
-the earlier top-level keys for existing consumers:
+- application: `freecad-model-health-assistant`
+- provider: `openai`
+- profile: `default`
+- service: `freecad-model-health-assistant:provider-credential`
+- account: `openai:default`
 
-- `schema_version` identifies the JSON contract independently of the plugin
-  version.
-- `document` holds structured document metadata currently limited to the local
-  FreeCAD document name.
-- `generated_at` is the explicit generation timestamp; the legacy `timestamp`
-  alias remains present.
-- `total_document_object_count` reports every object captured from the FreeCAD
-  document, while `meaningful_modeling_feature_count` reports only additive,
-  subtractive, finishing, and pattern features.
-- `category_counts`, `total_sketch_count`, and
-  `warning_counts_by_severity` make the report summary auditable without
-  reclassifying the feature and warning arrays.
-- Each feature retains its category, direct dependencies and dependents, sketch
-  support details, and confirmed error details. Each warning retains its stable
-  rule ID and severity.
-- `health_score_breakdown` retains the complete deterministic score calculation.
+`keyring_backend.py` lazily imports `keyring`, requires a positive-priority
+allowlisted operating-system backend, and rejects null, fail, chainer,
+plaintext, and file backends. Backend exceptions are translated into fixed
+project errors without their raw text.
 
-For backward compatibility, `document_name`, `timestamp`, and
-`total_feature_count` remain in schema 0.3. `total_feature_count` is the legacy
-name for the extracted document-object count; new consumers should use
-`total_document_object_count` because its meaning is unambiguous.
+The key can be read only through
+`retrieve_for_provider_execution("openai")`. Status types report configured,
+missing, unavailable, or storage-error state without returning the key. No
+credential-bearing dataclass, serialized status, plaintext fallback, preference
+field, repository file, or environment fallback exists.
 
-### Provider-Neutral Explanation Foundation
+`provider_settings_ui.py` owns the hidden key input and explicit save, replace,
+remove, and connection-test controls. The stored key is never read back into the
+UI. `provider_settings.py` and `freecad_provider_settings.py` persist only these
+non-secret fields:
 
-The explanation branch begins only after `ModelHealthReport` is complete. It
-does not read a live FreeCAD document, rerun extraction, parse the JSON report
-file, or receive a report path.
+- `provider_identifier`
+- `preferred_model_identifier`
+- `request_timeout_seconds`
+- `maximum_retries`
+- `maximum_output_tokens`
+- `reasoning_effort`
+- `response_verbosity`
+- `real_provider_enabled`
+- `last_explanation_mode`
 
-`model_health_assistant.ai_models` defines pure Python, JSON-compatible context,
-request, and response contracts. Context, request, and response schema versions
-are independently fixed at `1.0`. No contract contains FreeCAD objects, Qt
-objects, credentials, paths, binary geometry, or automatic model-modification
-instructions.
+## Privacy-Safe Context Boundary
 
-`model_health_assistant.ai_context` is the only report-to-provider data boundary.
-It builds a new `AIRequestContext` through an explicit allowlist. It excludes or
-redacts absolute Windows and private POSIX paths, excludes the real document name
-by default, omits report metadata and output paths, and never copies the entire
-report. Allowlisted evidence is rebuilt from reviewed feature fields; unsupported
-values and arbitrary metadata are omitted without using `repr`.
+`ai_context.py` is the only report-to-provider data boundary. It creates a new
+`AIRequestContext` from explicit fields and allowlisted evidence. It does not
+copy the report object or parse the saved JSON file.
 
-CAD-originated strings—including document names, feature labels, warning text,
-notes, and evidence—remain untrusted data. `model_health_assistant.ai_prompts`
-serializes the context as canonical JSON between explicit untrusted-context
-delimiters. Its system instruction says not to follow instructions embedded in
-CAD data. Prompt template version `model-health-explanation-v1` is recorded in
-request metadata.
+Excluded inputs include raw CAD files, geometry, meshes, point clouds, images,
+screenshots, arbitrary custom properties, environment variables, credentials,
+console output, stack traces, and local paths. The real document name is
+excluded by default. Absolute Windows and private POSIX paths are rejected or
+redacted.
 
-Default limit policy `context-limits-v1` is deterministic:
+Default deterministic policy `context-limits-v1` applies:
 
 | Limit | Default |
 | --- | ---: |
-| Warnings | 50 |
+| Included warnings | 50 |
 | Inline feature summaries | 50 |
 | Characters per text field | 2,000 |
 | Items per allowlisted evidence list | 10 |
 | Canonical serialized context characters | 64,000 |
 
-Warnings are prioritized high, then medium, then low, with stable source order
-inside each severity. Truncation always preserves valid JSON. Context metadata
-discloses the limit policy, configured limits, original/included/omitted warning
-counts, omitted field identifiers, truncated field count, and final serialized
-character count. These are character and item limits, not token estimates.
+Warnings are prioritized high, medium, then low, with stable source order within
+each severity. Metadata discloses original/included/omitted warning counts,
+truncation, omitted field identifiers, configured limits, and serialized size.
+These are character/item limits, not token estimates.
 
-`model_health_assistant.ai_provider.AIExplanationProvider` is a structural,
-provider-neutral contract. It accepts only `AIExplanationRequest` and returns
-`AIExplanationResponse`. `LocalMockAIProvider` is the only implementation. It is
-deterministic, has no configuration or credential input, creates no new risk
-findings, does not recalculate the score, and does not claim to inspect geometry
-or use an AI model.
+Selected-warning requests build a one-warning scoped report snapshot, then
+restore only the global counts needed for context. Full analysis and grounded
+questions use the complete limited allowlisted context.
 
-`model_health_assistant.ai_service.AIExplanationService` receives an explicitly
-injected provider and coordinates context construction, prompt construction,
-execution, and response validation. Validation rejects wrong schemas, provider
-identity mismatches, unknown warning identities, changed severities, duplicate
-explanations, missing explanation text, and missing global limitations. A valid
-partial response may omit per-warning explanations.
+## Prompt and Consent Boundary
 
-### UI Workflow and Results Dialog
+`ai_prompts.py` serializes CAD-derived text as canonical JSON between explicit
+untrusted-data delimiters. The system instruction says that labels, warning
+text, evidence, and similar CAD-originated strings are data rather than
+instructions. A grounded user's question is a separate bounded field and
+separate delimiter block.
 
-`model_health_assistant.ui.run_analysis_command` owns the synchronous
-application workflow:
+Versions are:
 
-1. resolve the active FreeCAD document
-2. extract a defensive fact snapshot
-3. run the deterministic local risk engine once
-4. attempt to save the completed report as local JSON
-5. build UI-neutral presentation data from the completed report
-6. print Report View output and create or update the results dialog
+- explanation prompt: `model-health-explanation-v3`
+- grounded-question prompt: `model-health-grounded-question-v2`
+- context schema: `1.0`
+- request schema: `1.0`
+- response schema: `1.0`
 
-The report object remains valid if JSON writing fails, so the UI still displays
-the completed analysis with report actions disabled and a concise partial-
-success status. Extraction and risk-engine failures preserve previously shown
-results and publish technical diagnostics to Report View.
+`ai_consent.py` freezes `AIRequestReview`, containing provider, configured model,
+request type, the exact provider-neutral request, the source report fingerprint,
+and SHA-256 request fingerprint. The preview displays both the privacy-safe
+context and exact provider-neutral request. `AIRequestConsent` is ephemeral,
+must be approved through **Send to Provider**, can be consumed once, and is
+invalidated by any report, selection, request, provider, or model change.
 
-The non-modal `QDialog` is parented to FreeCAD's main window and retained by one
-module-level controller reference. Repeated command activation and manual
-refresh replace the dialog's values and rows rather than accumulating stale
-results or new windows. The controller stores the exact analyzed document
-identity. Feature selection revalidates that document and resolves the object by
-its structured internal name before using `FreeCADGui.Selection`; it does not
-modify model or view properties.
+No blanket or persistent consent exists.
 
-Report-folder opening uses Qt's local-file URL support and passes only the
-report's parent directory. Clipboard support copies only the complete report
-path. Refresh is explicit and synchronous—there are no timers, observers,
-threads, retry loops, or background analysis.
+## Provider-Neutral Workflow
 
-The results controller also retains the completed `ModelHealthReport` for two
-explicit local actions. **Preview AI Context** displays exactly the allowlisted
-context as read-only JSON with a no-transmission notice. **Test Mock
-Explanation** injects `LocalMockAIProvider`, invokes the service, and displays
-the validated response separately from the source warnings with a no-AI/no-
-network notice. Both child dialogs are parented and reused. If the analyzed
-document is closed, replaced, or no longer active, the report snapshot remains
-usable and the results status discloses that state. Neither action writes a file,
-uses the clipboard, modifies the model, or changes the health score.
+`ai_workflow.py` resolves current non-secret settings and readiness. For a real
+request, it verifies the static model capability record and secure credential
+status without fetching the key. After consent is consumed on the GUI thread,
+it builds `AIExecutionPlan` containing only:
 
-FreeCAD, FreeCADGui, and PySide imports are guarded. PySide is loaded only from
-FreeCAD's bundled PySide2 or legacy PySide namespaces at UI-creation time.
-Importing and testing the package outside FreeCAD therefore remains safe.
+- request type
+- provider identifier
+- configured model identifier
+- reviewed `AIExplanationRequest`
+- selected provider implementation
 
-### Responsibility Boundaries
+The plan contains no FreeCAD document, Qt widget, report path, settings adapter,
+or raw report. Credential retrieval occurs inside provider client construction
+when the plan actually executes.
 
-- `Init.py`: expose the local package layout to FreeCAD.
-- `InitGui.py`: register the workbench, stable command ID, menu, and toolbar;
-  delegate activation.
-- `extractor.py`: read FreeCAD objects and produce model facts without mutation.
-- `models.py`: define pure structured facts, warnings, and completed reports.
-- `risk_engine.py`: own all warning rules, severity, deduplication, and scoring.
-- `report_writer.py`: own local path construction and JSON serialization.
-- `presentation.py`: reshape completed structured results for display only.
-- `ai_models.py`: define provider-neutral JSON-compatible AI contracts.
-- `ai_context.py`: apply the privacy allowlist, sanitization, and deterministic
-  size limits to a completed report.
-- `ai_prompts.py`: build the versioned prompt from the safe context and delimit
-  untrusted CAD text.
-- `ai_provider.py`: define the provider contract and neutral error taxonomy.
-- `mock_ai_provider.py`: implement the deterministic local test provider.
-- `ai_service.py`: orchestrate an injected provider and validate its response.
-- `ui.py`: orchestrate one analysis run, print status, manage the native dialog,
-  retain the completed report, and handle explicit user actions.
+`AIExplanationService` invokes the injected `AIExplanationProvider` and validates
+the provider-neutral response. `LocalMockAIProvider` is deterministic, offline,
+and credential-free. It passes through the same response validation contract.
 
-Automated tests exercise pure logic and headless fakes; they require neither a
-FreeCAD installation nor a pip-installed PySide package.
+## OpenAI Adapter
 
-## Privacy Design
+`openai_provider.py` is isolated from FreeCAD, Qt, reports, rules, scoring, and
+credential backend implementation. It lazily imports the official SDK and
+constructs a short-lived client only for an explicitly launched request.
 
-The privacy posture is explicit:
+The adapter uses the Responses API with:
 
-- CAD files stay local.
-- JSON reports stay local by default.
-- AI context is rebuilt from an explicit allowlist; a complete report is not
-  passed across the provider boundary.
-- Absolute paths and private path components are excluded or redacted.
-- CAD-originated text is treated as untrusted data.
-- Deterministic truncation is disclosed.
-- No AI model or real provider is called.
-- No API key is accepted or stored.
-- No HTTP client, provider SDK, telemetry, or analytics is present.
-- No server backend is used.
-- No CAD files or reports are uploaded.
+- strict JSON-schema structured output
+- `store=False`
+- `background=False`
+- `stream=False`
+- `tools=[]`
+- `tool_choice="none"`
+- `parallel_tool_calls=False`
+- bounded SDK retries and explicit timeouts
 
-The local context preview is transparency tooling, not transmission. The mock
-explanation proves the architecture without intelligence or connectivity.
+It does not upload files, enable tools, perform web/file search, execute code,
+use computer control, create persistent conversations, or retain response IDs
+for continuation.
 
-## Next-Milestone Boundary
+Configured defaults are:
 
-**Secure API-Key and Real Provider Integration** is intentionally deferred. A
-future real-provider adapter needs to implement only:
+- provider: `openai`
+- model: `gpt-5.6-terra`
+- connect timeout: 10 seconds
+- read timeout: 45 seconds
+- total request timeout: 60 seconds
+- SDK maximum retries: 2
+- maximum output: 8,192 tokens
+- reasoning effort: `low`
+- response verbosity: `medium`
 
-1. stable provider identity
-2. provider availability
-3. translation from `AIExplanationRequest` to the provider-specific request
-4. network execution
-5. translation from the provider-specific response to `AIExplanationResponse`
-6. mapping provider-specific failures to the neutral error taxonomy
+The static registry also supports `gpt-5.6-luna` and `gpt-5.6-sol`. There is no
+startup model-list fetch and no automatic model switching.
 
-A future credential manager must be a separate component from the FreeCAD
-dialog, context builder, prompt builder, analysis engine, and provider-neutral
-service. That milestone may add OS-backed credential storage; key add, replace,
-and remove actions; provider selection; connection testing; explicit consent;
-payload preview; timeout, authentication, and rate-limit handling; and explicit
-**Explain Selected Warning** and **Explain Full Analysis** actions. No placeholder
-key storage, provider selection, or real execution code exists in this milestone.
+The adapter converts SDK responses immediately to provider-neutral dataclasses.
+Raw SDK response objects, headers, and provider exception text do not cross the
+adapter boundary. It retains only safe metadata: provider, actual model when
+available, request ID, and provider-reported token counters.
+
+## Response Validation and Traceability
+
+`ai_service.py` rejects wrong response types/schema/provider identity, malformed
+usage, missing required text/limitations, and warning explanations that do not
+match one source tuple:
+
+```text
+(warning_id, rule_id, affected_feature_internal_name)
+```
+
+It also rejects duplicate identities and source-severity mismatches. A valid
+partial response may omit some per-warning explanations; omission never creates
+a local finding.
+
+`ai_traceability.py` repeats grounding at UI completion, revalidates the report,
+selection, and request fingerprint, and produces immutable
+`AIResponseTraceability` and `AIWarningTraceability` records. These retain source
+rule ID, feature internal name/label, source severity, request fingerprint,
+response schema, provider, configured/actual model, prompt version, and context
+version. The original `RiskWarning` objects are never modified.
+
+`ai_result_presentation.py` labels local findings and AI-generated advisory text
+separately. It displays provenance, provider/model/request/usage metadata,
+limitations, and the no-model-change disclaimer. Output is plain read-only text;
+there are no executable suggestion actions.
+
+## Asynchronous State and Cancellation
+
+`qt_async.py` runs a prepared provider operation away from the GUI thread and
+returns results through Qt signals. The worker receives no live FreeCAD object.
+UI updates occur only in main-thread callbacks.
+
+`ai_request_state.py` allows one accepted request per interface and issues a
+monotonic ticket. Progress, success, and failure callbacks must present the
+active ticket. Cancellation is logical: the ticket is invalidated and late
+callbacks are ignored while the underlying SDK call may end normally. Threads
+are never forcibly terminated. Detach/close states suppress callbacks to closed
+or destroyed dialogs.
+
+The results callback performs traceability validation against the controller's
+current report and, for a selected request, its current warning selection and
+live feature target. A response that became stale while the provider was
+running is rejected rather than displayed.
+
+## Errors, Retries, and Diagnostics
+
+`ai_provider.py` defines provider-neutral errors for missing credentials,
+credential backend failure, dependency failure, authentication, permission,
+unsupported model, invalid request, rate limit, connection, timeout, server
+failure, refusal, output limit, malformed output, cancellation, and unknown
+provider failure.
+
+`ai_error_handling.py` maps those types to fixed user-facing categories without
+using raw exception text. Report View diagnostics contain only redacted request
+type/provider/model/category/timing metadata. They exclude credentials,
+authorization headers, full context/responses, stack traces, and local paths.
+
+The OpenAI SDK owns the single bounded retry policy. The application does not
+add another loop. Authentication, permission, invalid request/model, refusal,
+and malformed responses are non-retryable. No request is retried indefinitely.
+
+## Responsibility Map
+
+- `Init.py`: expose local package layout.
+- `InitGui.py`: register workbench and commands; delegate activation.
+- `extractor.py`: read FreeCAD into a defensive fact snapshot.
+- `models.py`: define local facts, warnings, and report schema.
+- `risk_engine.py`: own local rules, severity, deduplication, and score.
+- `report_writer.py`: write only typed local reports.
+- `presentation.py`: create UI-neutral local display data.
+- `runtime_dependencies.py` / `ai_capabilities.py`: locate and report optional
+  runtime capability without installation or network calls.
+- `credentials.py` / `keyring_backend.py`: isolate provider-neutral and OS-backed
+  secret storage.
+- `provider_settings.py` / `freecad_provider_settings.py`: persist allowlisted
+  non-secret settings.
+- `provider_settings_ui.py`: key management and explicit connection test.
+- `ai_models.py`: provider-neutral request/response contracts.
+- `ai_context.py`: privacy allowlist and deterministic context limits.
+- `ai_prompts.py`: untrusted-data delimiters and versioned prompts.
+- `ai_consent.py`: exact preview, fingerprints, and one-use consent.
+- `ai_model_capabilities.py`: static provider/model capability validation.
+- `ai_provider.py`: provider protocol and neutral error taxonomy.
+- `mock_ai_provider.py`: deterministic offline provider.
+- `openai_provider.py`: Responses API translation and SDK error mapping.
+- `ai_service.py`: provider execution and structured-response validation.
+- `ai_workflow.py`: readiness, review, provider selection, and execution plan.
+- `ai_request_state.py` / `qt_async.py`: request tickets, background execution,
+  logical cancellation, and stale-callback rejection.
+- `ai_traceability.py`: completion-time grounding and immutable provenance.
+- `ai_result_presentation.py` / `ai_usage_presentation.py`: read-only advisory
+  text and safe provider/model/request/token metadata.
+- `ui.py`: results workflow, consent launch, completion revalidation, and dialogs.
+
+## Security Invariants
+
+- Workbench startup performs no provider import, key retrieval, or network call.
+- Missing optional dependencies, missing keys, or offline state do not disable
+  local analysis.
+- Secrets are stored only through an approved OS credential backend; failures
+  are closed with no plaintext fallback.
+- Settings and report writers use explicit non-secret/typed schemas.
+- Every real request is explicit; every explanation/question receives exact
+  payload review and one-use consent.
+- Previewed context is the same context object passed to provider execution.
+- Provider tools, uploads, code execution, and model mutation are unavailable.
+- Responses cannot become local rule findings or execute application actions.
+- Unknown, duplicate, mismatched, malformed, or stale response data is rejected.
+- Automated tests use fake providers/backends and obvious sentinel values; they
+  never access the real credential store or make a live provider call.

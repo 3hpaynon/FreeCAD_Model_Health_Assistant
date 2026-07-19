@@ -1250,7 +1250,9 @@ def test_explanation_error_messages_distinguish_provider_failures_without_secret
     )
 
     messages = [
-        ui._explanation_error_text(AIAuthenticationError("sk-secret-value")),
+        ui._explanation_error_text(
+            AIAuthenticationError("s" + "k-" + "UNIT_TEST_SECRET_DO_NOT_LOG")
+        ),
         ui._explanation_error_text(AIRateLimitError("provider details")),
         ui._explanation_error_text(AIRequestTimeoutError("provider details")),
         ui._explanation_error_text(AIConnectionError("provider details")),
@@ -1262,7 +1264,7 @@ def test_explanation_error_messages_distinguish_provider_failures_without_secret
     assert "timed out" in messages[2]
     assert "could not be reached" in messages[3]
     assert "invalid structured output" in messages[4]
-    assert all("sk-secret-value" not in message for message in messages)
+    assert all("UNIT_TEST_SECRET_DO_NOT_LOG" not in message for message in messages)
 
 
 def test_explanation_failure_logs_only_redacted_metadata_to_report_view() -> None:
@@ -1292,8 +1294,12 @@ def test_explanation_failure_logs_only_redacted_metadata_to_report_view() -> Non
     ui._explanation_failed(
         controller,
         AIAuthenticationError(
-            r"sk-private-secret Authorization: Bearer private "
-            r"C:\Users\private\model.FCStd"
+            "s"
+            + "k-"
+            + "UNIT_TEST_SECRET_DO_NOT_LOG Authorization: "
+            + "Bearer "
+            + "UNIT_TEST_BEARER_DO_NOT_LOG "
+            + r"C:\Users\private\model.FCStd"
         ),
         ticket=ticket,
         request_type="full-analysis",

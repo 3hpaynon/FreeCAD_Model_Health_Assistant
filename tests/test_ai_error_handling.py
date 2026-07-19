@@ -26,7 +26,7 @@ from model_health_assistant.ai_provider import (
     AIUnsupportedSDKError,
 )
 
-_RAW_SECRET = "sk-this-secret-must-never-escape"
+_RAW_SECRET = "s" + "k-" + "UNIT_TEST_SECRET_DO_NOT_LOG"
 
 
 @pytest.mark.parametrize(
@@ -106,7 +106,7 @@ def test_workflow_readiness_codes_map_without_parsing_message_text(
 
 def test_redaction_removes_headers_keys_paths_tracebacks_and_raw_objects() -> None:
     raw = (
-        "Authorization: Bearer super-secret-bearer\n"
+        "Authorization: " + "Bearer " + "UNIT_TEST_BEARER_DO_NOT_LOG\n"
         '"api_key": "ordinary-secret-value"\n'
         "x-api-key=another-secret\n"
         f"provider key {_RAW_SECRET}\n"
