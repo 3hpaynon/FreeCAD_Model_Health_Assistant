@@ -33,6 +33,7 @@ output/
 
 # OS/editor noise
 .DS_Store
+.AppleDouble
 Thumbs.db
 .idea/
 .vscode/
