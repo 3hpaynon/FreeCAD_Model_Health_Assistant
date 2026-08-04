@@ -180,6 +180,21 @@ def test_save_and_load_report_json(tmp_path) -> None:
     }
 
 
+def test_report_json_preserves_non_ascii_text_as_utf8(tmp_path) -> None:
+    document_name = "Mécanisme_日本語"
+    report = ModelHealthReport(
+        document_name=document_name,
+        generated_at="2026-06-26T00:00:00+00:00",
+        health_score=100,
+    )
+
+    output_path = save_report_json(report, tmp_path / "unicode-report.json")
+    serialized = output_path.read_text(encoding="utf-8")
+
+    assert document_name in serialized
+    assert load_report_json(output_path)["document_name"] == document_name
+
+
 def test_report_writer_rejects_arbitrary_mapping_before_creating_a_file(
     tmp_path,
 ) -> None:

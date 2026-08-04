@@ -7,8 +7,8 @@ this hook exposes that package layout to FreeCAD without requiring installation.
 
 from __future__ import annotations
 
-import os
 import sys
+from pathlib import Path
 
 ADDON_NAME = "ModelHealthAssistant"
 
@@ -23,20 +23,17 @@ def get_addon_root(_addon_name: str = ADDON_NAME) -> str:
 
     module_file = globals().get("__file__")
     if module_file:
-        return os.path.normpath(os.path.dirname(os.path.abspath(module_file)))
+        return str(Path(module_file).resolve().parent)
 
     if App is not None and hasattr(App, "getUserAppDataDir"):
         try:
-            return os.path.normpath(os.path.join(App.getUserAppDataDir(), "Mod", _addon_name))
-        except Exception:
+            return str(Path(App.getUserAppDataDir()).expanduser() / "Mod" / _addon_name)
+        except (OSError, RuntimeError, TypeError, ValueError):
             pass
 
-    appdata_dir = os.environ.get("APPDATA")
-    if appdata_dir:
-        return os.path.normpath(os.path.join(appdata_dir, "FreeCAD", "Mod", _addon_name))
-
-    return os.path.normpath(
-        os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "FreeCAD", "Mod", _addon_name)
+    raise RuntimeError(
+        "Model Health Assistant could not determine its addon root because "
+        "__file__ and FreeCAD.getUserAppDataDir() are unavailable."
     )
 
 
@@ -73,22 +70,24 @@ def ensure_src_on_path(
 ) -> str:
     """Add the local ``src`` directory to ``sys.path`` when available."""
 
-    addon_root = _get_addon_root()
-    src_dir = os.path.normpath(os.path.join(addon_root, "src"))
-    _write_message("Model Health Assistant addon root: " + addon_root + "\n")
-    _write_message("Model Health Assistant src path: " + src_dir + "\n")
+    addon_root = Path(_get_addon_root()).expanduser()
+    src_dir = addon_root / "src"
+    addon_root_text = str(addon_root)
+    src_dir_text = str(src_dir)
+    _write_message("Model Health Assistant addon root: " + addon_root_text + "\n")
+    _write_message("Model Health Assistant src path: " + src_dir_text + "\n")
 
-    if not os.path.isdir(src_dir):
+    if not src_dir.is_dir():
         _write_error(
             "Model Health Assistant could not find its local src folder: "
-            + src_dir
+            + src_dir_text
             + "\n"
         )
-        return src_dir
+        return src_dir_text
 
-    if src_dir not in sys.path:
-        sys.path.insert(0, src_dir)
-    return src_dir
+    if src_dir_text not in sys.path:
+        sys.path.insert(0, src_dir_text)
+    return src_dir_text
 
 
 SRC_DIR = ensure_src_on_path()

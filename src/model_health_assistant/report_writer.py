@@ -53,7 +53,10 @@ def save_report_json(report: ModelHealthReport, output_path: str | Path) -> Path
     report_dict = report_to_dict(report)
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(report_dict, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(report_dict, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
     return path
 
 

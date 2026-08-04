@@ -1,4 +1,5 @@
 import ast
+import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -162,6 +163,7 @@ def test_optional_dependency_directory_is_versioned_and_not_created(tmp_path) ->
         appdata_directory=appdata,
         version_info=(3, 11, 13),
         machine="AMD64",
+        platform_identifier="win32",
     )
 
     assert directory == (
@@ -171,6 +173,59 @@ def test_optional_dependency_directory_is_versioned_and_not_created(tmp_path) ->
         / "py311-win_amd64"
     )
     assert directory.exists() is False
+
+
+def test_optional_dependency_directory_uses_freecad_user_data_on_macos(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    freecad_user_data = tmp_path / "Library" / "Application Support" / "FreeCAD"
+    monkeypatch.setitem(
+        sys.modules,
+        "FreeCAD",
+        SimpleNamespace(getUserAppDataDir=lambda: str(freecad_user_data)),
+    )
+
+    directory = get_optional_dependency_directory(
+        version_info=(3, 11, 13),
+        machine="arm64",
+        platform_identifier="darwin",
+    )
+
+    assert directory == (
+        freecad_user_data
+        / "ModelHealthAssistantDependencies"
+        / "py311-macos_arm64"
+    )
+    assert directory.exists() is False
+
+
+def test_optional_dependency_directory_has_no_guessed_macos_fallback(
+    monkeypatch,
+) -> None:
+    monkeypatch.delitem(sys.modules, "FreeCAD", raising=False)
+    monkeypatch.setenv("APPDATA", "C:\\ignored-on-macos")
+
+    assert (
+        get_optional_dependency_directory(
+            version_info=(3, 11),
+            machine="x86_64",
+            platform_identifier="darwin",
+        )
+        is None
+    )
+
+
+def test_optional_dependency_directory_rejects_empty_explicit_user_data() -> None:
+    assert (
+        get_optional_dependency_directory(
+            freecad_user_data_directory="",
+            version_info=(3, 11),
+            machine="arm64",
+            platform_identifier="darwin",
+        )
+        is None
+    )
 
 
 def test_optional_dependency_directory_is_appended_only_when_present(tmp_path) -> None:

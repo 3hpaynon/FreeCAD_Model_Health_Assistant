@@ -20,22 +20,48 @@ RUNTIME_DEPENDENCY_DIRECTORY_NAME = "ModelHealthAssistantDependencies"
 
 def get_optional_dependency_directory(
     *,
+    freecad_user_data_directory: str | os.PathLike[str] | None = None,
     appdata_directory: str | os.PathLike[str] | None = None,
     version_info: Sequence[int] | None = None,
     machine: str | None = None,
+    platform_identifier: str | None = None,
 ) -> Path | None:
     """Return the isolated optional-dependency directory for this Python ABI.
 
-    ``None`` is returned when no Windows roaming application-data directory is
-    available.  The path is calculated only; no filesystem mutation occurs.
+    FreeCAD's own user-data directory is preferred because FreeCAD supplies the
+    correct platform-specific location.  ``appdata_directory`` remains as a
+    Windows-compatible fallback and injectable test boundary.  The path is
+    calculated only; no filesystem mutation occurs.
     """
 
-    appdata_value = (
-        os.fspath(appdata_directory)
-        if appdata_directory is not None
-        else os.environ.get("APPDATA", "")
-    )
-    if not appdata_value.strip():
+    if freecad_user_data_directory is not None and appdata_directory is not None:
+        raise ValueError(
+            "Specify either freecad_user_data_directory or appdata_directory, not both."
+        )
+
+    active_platform = sys.platform if platform_identifier is None else platform_identifier
+    platform_family = _platform_family(active_platform)
+    if freecad_user_data_directory is not None:
+        freecad_user_data_value = os.fspath(freecad_user_data_directory)
+        if not freecad_user_data_value.strip():
+            return None
+        user_data_directory = Path(freecad_user_data_value).expanduser()
+    else:
+        user_data_directory = _active_freecad_user_data_directory()
+
+    if user_data_directory is None:
+        appdata_value = (
+            os.fspath(appdata_directory)
+            if appdata_directory is not None
+            else os.environ.get("APPDATA", "")
+            if platform_family == "windows"
+            else ""
+        )
+        if not appdata_value.strip():
+            return None
+        user_data_directory = Path(appdata_value).expanduser() / "FreeCAD"
+
+    if not str(user_data_directory).strip():
         return None
 
     active_version = sys.version_info if version_info is None else version_info
@@ -43,10 +69,12 @@ def get_optional_dependency_directory(
         raise ValueError("version_info must contain major and minor values")
     major = int(active_version[0])
     minor = int(active_version[1])
-    architecture = _normalized_architecture(platform.machine() if machine is None else machine)
+    architecture = _normalized_architecture(
+        platform.machine() if machine is None else machine,
+        platform_family,
+    )
     return (
-        Path(appdata_value)
-        / "FreeCAD"
+        user_data_directory
         / RUNTIME_DEPENDENCY_DIRECTORY_NAME
         / f"py{major}{minor}-{architecture}"
     )
@@ -84,19 +112,56 @@ def activate_optional_dependency_directory(
     return directory.resolve()
 
 
-def _normalized_architecture(machine: str) -> str:
+def _active_freecad_user_data_directory() -> Path | None:
+    app_module = sys.modules.get("FreeCAD")
+    getter = getattr(app_module, "getUserAppDataDir", None)
+    if not callable(getter):
+        return None
+    try:
+        value = getter()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+    if not isinstance(value, (str, os.PathLike)) or not os.fspath(value).strip():
+        return None
+    return Path(value).expanduser()
+
+
+def _platform_family(platform_identifier: str) -> str:
+    normalized = str(platform_identifier or "").strip().casefold()
+    if normalized.startswith("win"):
+        return "windows"
+    if normalized == "darwin":
+        return "macos"
+    if normalized.startswith("linux"):
+        return "linux"
+    return "other"
+
+
+def _normalized_architecture(machine: str, platform_family: str) -> str:
     normalized = str(machine or "unknown").strip().lower().replace("-", "_")
-    aliases = {
-        "amd64": "win_amd64",
-        "x86_64": "win_amd64",
-        "x64": "win_amd64",
-        "arm64": "win_arm64",
-        "aarch64": "win_arm64",
-        "x86": "win32",
-        "i386": "win32",
-        "i686": "win32",
+    architecture_aliases = {
+        "amd64": "x86_64",
+        "x64": "x86_64",
+        "aarch64": "arm64",
+        "x86": "x86",
+        "i386": "x86",
+        "i686": "x86",
     }
-    return aliases.get(normalized, normalized or "unknown")
+    architecture = architecture_aliases.get(normalized, normalized or "unknown")
+    platform_prefixes = {
+        "windows": "win",
+        "macos": "macos",
+        "linux": "linux",
+    }
+    platform_prefix = platform_prefixes.get(platform_family)
+    if platform_prefix is None:
+        return architecture
+    if platform_family == "windows":
+        if architecture == "x86":
+            return "win32"
+        if architecture == "x86_64":
+            architecture = "amd64"
+    return f"{platform_prefix}_{architecture}"
 
 
 __all__ = [

@@ -30,6 +30,18 @@ def test_init_adds_src_to_python_path() -> None:
     assert str(src_dir) in sys.path
 
 
+def test_init_uses_freecad_user_data_when_file_location_is_unavailable(
+    tmp_path,
+) -> None:
+    module = _load_module("mha_test_init_freecad_user_data", REPO_ROOT / "Init.py")
+    del module.__file__
+    module.App = types.SimpleNamespace(getUserAppDataDir=lambda: str(tmp_path))
+
+    assert module.get_addon_root() == str(
+        tmp_path / "Mod" / "ModelHealthAssistant"
+    )
+
+
 def test_init_gui_is_import_safe_without_freecad(monkeypatch) -> None:
     monkeypatch.delitem(sys.modules, "FreeCAD", raising=False)
     monkeypatch.delitem(sys.modules, "FreeCADGui", raising=False)
