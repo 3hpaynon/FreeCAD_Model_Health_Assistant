@@ -7,6 +7,58 @@ try:  # pragma: no cover - exercised inside FreeCAD.
 except Exception:  # pragma: no cover - expected outside FreeCAD.
     App = None
 
+
+def ensure_src_on_path(
+    _module_file=locals().get("__file__"),
+    _app_module=None,
+) -> str | None:
+    """Expose the sibling ``src`` package when FreeCAD loads only InitGui.py."""
+
+    import sys
+    from pathlib import Path
+
+    plugin_root = None
+    if _module_file:
+        try:
+            plugin_root = Path(_module_file).resolve().parent
+        except (OSError, RuntimeError, TypeError, ValueError):
+            plugin_root = None
+
+    active_app = _app_module
+    if plugin_root is None and active_app is None:
+        try:
+            import FreeCAD as active_app  # type: ignore
+        except Exception:  # pragma: no cover - expected outside FreeCAD.
+            active_app = None
+
+    if (
+        plugin_root is None
+        and active_app is not None
+        and hasattr(active_app, "getUserAppDataDir")
+    ):
+        try:
+            plugin_root = (
+                Path(active_app.getUserAppDataDir()).expanduser()
+                / "Mod"
+                / "ModelHealthAssistant"
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            plugin_root = None
+
+    if plugin_root is None:
+        return None
+    src_dir = plugin_root / "src"
+    if not src_dir.is_dir():
+        return None
+
+    src_dir_text = str(src_dir)
+    if src_dir_text not in sys.path:
+        sys.path.insert(0, src_dir_text)
+    return src_dir_text
+
+
+SRC_DIR = ensure_src_on_path()
+
 try:  # pragma: no cover - exercised inside FreeCAD.
     import FreeCADGui as Gui  # type: ignore
 except Exception:  # pragma: no cover - expected outside FreeCAD.

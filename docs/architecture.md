@@ -102,12 +102,18 @@ not change model properties.
 
 ## Optional Dependency Boundary
 
-`runtime_dependencies.py` calculates and lazily appends an existing user-owned
-ABI-specific directory:
+`runtime_dependencies.py` obtains FreeCAD's platform-correct user-data
+directory from `FreeCAD.getUserAppDataDir()` when running inside FreeCAD, then
+calculates and lazily appends an existing user-owned ABI-specific directory:
 
 ```text
-%APPDATA%\FreeCAD\ModelHealthAssistantDependencies\py<major><minor>-<architecture>
+<FreeCAD user directory>/ModelHealthAssistantDependencies/py<major><minor>-<platform>_<architecture>
 ```
+
+Windows retains the `%APPDATA%\FreeCAD` fallback when FreeCAD's module is not
+available. macOS does not guess a `~/Library` location; FreeCAD's reported user
+directory is authoritative. Current directory examples include
+`py311-win_amd64`, `py311-macos_arm64`, and `py311-macos_x86_64`.
 
 It never creates the directory, installs packages, prepends it ahead of
 FreeCAD's built-ins, or modifies the FreeCAD installation. The pinned optional

@@ -42,6 +42,81 @@ def test_init_uses_freecad_user_data_when_file_location_is_unavailable(
     )
 
 
+def test_init_gui_adds_its_src_to_python_path_once(monkeypatch) -> None:
+    src_dir = str(REPO_ROOT / "src")
+    monkeypatch.setattr(sys, "path", [item for item in sys.path if item != src_dir])
+    monkeypatch.delitem(sys.modules, "FreeCAD", raising=False)
+    monkeypatch.delitem(sys.modules, "FreeCADGui", raising=False)
+
+    module = _load_module("mha_test_init_gui_src", REPO_ROOT / "InitGui.py")
+
+    assert module.SRC_DIR == src_dir
+    assert sys.path[0] == src_dir
+    assert module.ensure_src_on_path() == src_dir
+    assert sys.path.count(src_dir) == 1
+
+
+def test_init_gui_bootstrap_handles_separate_freecad_exec_namespaces(
+    monkeypatch,
+) -> None:
+    src_dir = str(REPO_ROOT / "src")
+    fake_app = types.ModuleType("FreeCAD")
+    fake_gui = types.ModuleType("FreeCADGui")
+    fake_gui.addWorkbench = lambda workbench: None
+    monkeypatch.setitem(sys.modules, "FreeCAD", fake_app)
+    monkeypatch.setitem(sys.modules, "FreeCADGui", fake_gui)
+    monkeypatch.setattr(sys, "path", [item for item in sys.path if item != src_dir])
+    source_path = REPO_ROOT / "InitGui.py"
+    source = source_path.read_text(encoding="utf-8")
+    global_namespace = {
+        "__builtins__": __builtins__,
+        "App": fake_app,
+        "Gui": fake_gui,
+    }
+    local_namespace = {
+        "__file__": str(source_path),
+        "__name__": "mha_test_init_gui_freecad_exec",
+    }
+
+    exec(  # noqa: S102 - deliberately reproduces FreeCAD's entrypoint loader.
+        compile(source, str(source_path), "exec"),
+        global_namespace,
+        local_namespace,
+    )
+
+    assert local_namespace["SRC_DIR"] == src_dir
+    assert sys.path[0] == src_dir
+
+
+def test_init_gui_uses_freecad_user_data_when_file_location_is_unavailable(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    plugin_root = tmp_path / "Mod" / "ModelHealthAssistant"
+    src_dir = plugin_root / "src"
+    src_dir.mkdir(parents=True)
+    fake_app = types.ModuleType("FreeCAD")
+    fake_app.getUserAppDataDir = lambda: str(tmp_path)
+    monkeypatch.setitem(sys.modules, "FreeCAD", fake_app)
+    monkeypatch.delitem(sys.modules, "FreeCADGui", raising=False)
+
+    module = _load_module(
+        "mha_test_init_gui_freecad_user_data",
+        REPO_ROOT / "InitGui.py",
+    )
+    monkeypatch.setattr(
+        sys,
+        "path",
+        [item for item in sys.path if item != str(src_dir)],
+    )
+
+    assert module.ensure_src_on_path(
+        _module_file=None,
+        _app_module=fake_app,
+    ) == str(src_dir)
+    assert sys.path[0] == str(src_dir)
+
+
 def test_init_gui_is_import_safe_without_freecad(monkeypatch) -> None:
     monkeypatch.delitem(sys.modules, "FreeCAD", raising=False)
     monkeypatch.delitem(sys.modules, "FreeCADGui", raising=False)
@@ -628,6 +703,9 @@ def test_test_command_prints_normally_without_freecad_console(monkeypatch, capsy
     monkeypatch.delitem(sys.modules, "FreeCAD", raising=False)
     monkeypatch.setitem(sys.modules, "FreeCADGui", fake_gui)
 
+    from model_health_assistant import ui
+
+    monkeypatch.setattr(ui, "App", None)
     module = _load_module("mha_test_init_gui_print_fallback", REPO_ROOT / "InitGui.py")
     workbench = module.ModelHealthAssistantWorkbench()
     workbench.Initialize()

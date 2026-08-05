@@ -8,6 +8,7 @@ actually requested.
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -2587,13 +2588,17 @@ def _validated_report_path(
 
     if report_path is None or not str(report_path).strip():
         return None, "No saved report path is available."
+    report_path_text = str(report_path)
     try:
         path = Path(report_path).expanduser().resolve(strict=True)
         is_file = path.is_file()
-    except (OSError, RuntimeError, ValueError):
-        return None, "The saved report file has been moved, deleted, or is unavailable."
+    except (OSError, RuntimeError, ValueError) as exc:
+        return None, (
+            "The saved report file has been moved, deleted, or is unavailable: "
+            f"'{report_path_text}' ({type(exc).__name__}, platform={sys.platform})."
+        )
     if not is_file:
-        return None, "The saved report path does not identify a file."
+        return None, f"The saved report path does not identify a file: '{path}'."
     return path, None
 
 
@@ -2610,9 +2615,20 @@ def _open_report_folder_with_qt(
     open_url = getattr(desktop_services, "openUrl", None)
     if not callable(from_local_file) or not callable(open_url):
         return "Opening local report folders is unavailable in this Qt runtime."
-    folder_url = from_local_file(str(report_path.parent))
-    if open_url(folder_url) is False:
-        return "The operating system could not open the report folder."
+    folder_path = report_path.parent
+    try:
+        folder_url = from_local_file(str(folder_path))
+        opened = open_url(folder_url)
+    except Exception as exc:  # noqa: BLE001 - defensive boundary around Qt runtime APIs.
+        return (
+            f"The report folder '{folder_path}' could not be opened "
+            f"({type(exc).__name__}, platform={sys.platform})."
+        )
+    if opened is False:
+        return (
+            f"The operating system could not open the report folder '{folder_path}' "
+            f"(platform={sys.platform})."
+        )
     return None
 
 

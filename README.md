@@ -63,6 +63,54 @@ requests additionally require review of the final payload followed by
 workbench and commands but does not import the OpenAI SDK, retrieve a credential,
 or perform network activity during discovery.
 
+### Native macOS installation from a linked repository
+
+The plugin root is the repository directory containing `Init.py` and
+`InitGui.py`. A normal clone under the developer directory is:
+
+```bash
+mkdir -p ~/Developer
+cd ~/Developer
+gh repo clone 3hpaynon/FreeCAD_Model_Health_Assistant
+```
+
+The resulting default repository path is
+`~/Developer/FreeCAD_Model_Health_Assistant`. Do not assume that FreeCAD's user
+directory has one universal macOS location. In FreeCAD, open **View > Panels >
+Python console** and use FreeCAD itself as the source of truth:
+
+```python
+import FreeCAD as App
+
+print(App.getUserAppDataDir())
+```
+
+A common macOS location is under `~/Library/Application Support`, but use the
+exact value printed above. In Terminal, assign that exact value, create its
+`Mod` directory when needed, and link the plugin root:
+
+```bash
+FREECAD_USER_DIR="PASTE_THE_PRINTED_FREECAD_USER_DIRECTORY"
+mkdir -p "${FREECAD_USER_DIR}/Mod"
+ln -s "${HOME}/Developer/FreeCAD_Model_Health_Assistant" \
+  "${FREECAD_USER_DIR}/Mod/ModelHealthAssistant"
+```
+
+Do not overwrite an existing destination without first determining whether it
+is the intended link or an existing addon installation. Completely quit and
+restart FreeCAD after changing the link, `Init.py`, `InitGui.py`, workbench
+registration, or command registration. Use **View > Panels > Report view** and
+the Python console to inspect startup errors. The console should be able to run:
+
+```python
+import model_health_assistant
+
+print(model_health_assistant.__version__)
+```
+
+Do not pip-install `FreeCAD`, `FreeCADGui`, `PySide`, `PySide2`, or `PySide6`.
+FreeCAD supplies its own application modules and Qt binding.
+
 ## Optional Runtime Dependencies
 
 Real OpenAI use requires these pinned optional dependencies:
@@ -84,6 +132,18 @@ the optional imports in the repository virtual environment, install the
 ```
 
 Do not create a second project virtual environment.
+
+On a fresh macOS clone, create the checkout's single development environment
+when `.venv` does not already exist:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
+.venv/bin/python -m pip install -e ".[real-ai]"
+```
+
+The `real-ai` command is optional and affects only repository development; it
+does not install packages into FreeCAD's embedded Python runtime.
 
 ### FreeCAD embedded runtime on Windows
 
@@ -130,6 +190,31 @@ versions. To remove the optional runtime dependencies, close FreeCAD and remove
 only that exact ABI-specific `ModelHealthAssistantDependencies` directory. This
 does not remove a credential from the operating-system credential backend; use
 **Remove Key** separately.
+
+### FreeCAD embedded runtime on macOS
+
+First use FreeCAD's Python console to inspect `sys.version`,
+`platform.machine()`, `sys.path`, and `App.getUserAppDataDir()` as shown above.
+The addon derives its optional dependency location from FreeCAD's reported user
+directory rather than assuming a fixed `~/Library` path:
+
+```text
+<FreeCAD user directory>/ModelHealthAssistantDependencies/py<major><minor>-macos_<architecture>
+```
+
+Examples include `py311-macos_arm64` and `py311-macos_x86_64`. Use a standalone
+Python interpreter matching FreeCAD's embedded Python major/minor and native
+architecture. Substitute the exact target derived from the console output:
+
+```bash
+MHA_RUNTIME_TARGET="EXACT_ABI_SPECIFIC_DIRECTORY"
+python3.11 -m pip install --upgrade --target "${MHA_RUNTIME_TARGET}" \
+  "openai==2.45.0" "keyring==25.7.0"
+```
+
+Do not install these packages into the FreeCAD application bundle. Restart
+FreeCAD after installation. The addon only appends an existing matching
+directory; it does not create the directory, run pip, or modify the application.
 
 ## Configure OpenAI
 
@@ -275,18 +360,20 @@ updated.
 - Confirm the package was installed for FreeCAD's embedded Python ABI, not only
   into `.venv`.
 - In FreeCAD's Python console, inspect `sys.version`, `platform.machine()`, and
-  `sys.path`.
-- Confirm the ABI-specific directory exists under
-  `%APPDATA%\FreeCAD\ModelHealthAssistantDependencies` and contains the pinned
-  packages, then restart FreeCAD.
+  `sys.path`, then obtain the user directory from `App.getUserAppDataDir()`.
+- On Windows, confirm the ABI-specific directory exists under
+  `%APPDATA%\FreeCAD\ModelHealthAssistantDependencies`. On macOS, confirm it
+  exists under the FreeCAD-reported user directory and uses a
+  `py<major><minor>-macos_<architecture>` name. Then restart FreeCAD.
 - A broken optional dependency must not prevent the workbench or local analyzer
   from loading.
 
 ### Secure credential storage unavailable or backend error
 
 - Confirm `keyring==25.7.0` is importable in FreeCAD's runtime.
-- Confirm Windows Credential Manager is available and the selected keyring
-  backend is the approved Windows OS backend, not a plaintext/file backend.
+- Confirm Windows Credential Manager or macOS Keychain is available and the
+  selected keyring backend is the approved operating-system backend, not a
+  plaintext/file backend.
 - Remove and reinstall only the optional ABI-specific dependency folder if its
   installation is corrupt. The addon never creates an insecure fallback.
 
@@ -367,6 +454,14 @@ Use the existing repository virtual environment:
 git diff --check
 ```
 
+On macOS, the equivalent commands are:
+
+```bash
+.venv/bin/python -m compileall Init.py InitGui.py src tests
+.venv/bin/python -m pytest -q --basetemp=.pytest_temp
+git diff --check
+```
+
 Normal automated tests use fakes and sentinels. They do not access the real OS
 credential entry or make a live API request. A live test is performed only by
 the user through FreeCAD after explicitly choosing **Test Connection** or
@@ -374,3 +469,33 @@ reviewing and sending an explanation request.
 
 See [docs/architecture.md](docs/architecture.md) for component boundaries and
 the complete request path.
+
+## Manual Native macOS FreeCAD Validation
+
+These checks require a native macOS FreeCAD session and have not been completed
+by the automated test suite:
+
+- [ ] Completely quit and reopen FreeCAD; confirm Report view contains no plugin
+  startup exception.
+- [ ] Confirm **Model Health Assistant** appears in the workbench selector and
+  can be activated.
+- [ ] Confirm the **Model Health Assistant** toolbar and command control appear.
+  The current command metadata does not define custom `Pixmap` artwork, so a
+  custom toolbar icon is not expected.
+- [ ] Confirm the **Model Health Assistant** menu appears with **Analyze Model
+  Health** and **AI Provider Settings**.
+- [ ] With no document open, confirm analysis is handled safely. Then open a
+  test `.FCStd` document and confirm the analysis command is available.
+- [ ] Run **Analyze Model Health** (the shared Analyze Feature Tree workflow) and
+  confirm the results dialog opens.
+- [ ] Confirm a JSON report is produced and its displayed path is a valid macOS
+  path under a user-writable location.
+- [ ] Use **Open Report Folder** and any available report-path action; confirm
+  Finder opens the expected report location.
+- [ ] Recheck Report view and confirm analysis and folder-opening produced no
+  exceptions.
+- [ ] In **View > Panels > Python console**, run `import model_health_assistant`,
+  then `print(model_health_assistant.__version__)`.
+- [ ] Preserve the passing automated suite, and repeat the core workbench,
+  analysis, JSON-report, and folder-opening smoke checks on Windows when a
+  Windows FreeCAD session is available.

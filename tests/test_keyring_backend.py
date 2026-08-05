@@ -40,6 +40,13 @@ class _SecureWindowsBackend:
 _SecureWindowsBackend.__module__ = "keyring.backends.Windows"
 
 
+class _SecureMacOSBackend(_SecureWindowsBackend):
+    pass
+
+
+_SecureMacOSBackend.__module__ = "keyring.backends.macOS"
+
+
 class _PlaintextBackend(_SecureWindowsBackend):
     pass
 
@@ -112,6 +119,25 @@ def test_status_activates_optional_path_and_accepts_windows_backend() -> None:
     assert status.functional is True
     assert status.status_code == "available"
     assert "self-test" in status.message
+
+
+def test_status_accepts_macos_backend_on_darwin() -> None:
+    entries = {}
+    module, _entries = _fake_keyring_module(
+        backend=_SecureMacOSBackend(entries),
+    )
+    adapter = KeyringCredentialBackend(
+        module_importer=lambda name: module,
+        dependency_path_activator=lambda: None,
+        platform_identifier="darwin",
+    )
+
+    status = adapter.status()
+
+    assert status.available is True
+    assert status.functional is True
+    assert status.status_code == "available"
+    assert entries == {}
 
 
 def test_missing_keyring_fails_closed() -> None:

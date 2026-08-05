@@ -393,13 +393,12 @@ def test_report_path_actions_revalidate_and_report_feedback(tmp_path) -> None:
     assert controller.open_report_folder() is False
     assert open_button.enabled is False
     assert copy_button.enabled is False
-    assert errors == [
-        "The saved report file has been moved, deleted, or is unavailable."
-    ]
-    assert messages[-1] == (
-        "Model Health Assistant: The saved report file has been moved, deleted, "
-        "or is unavailable.\n"
-    )
+    assert len(errors) == 1
+    assert "moved, deleted, or is unavailable" in errors[0]
+    assert str(report_file) in errors[0]
+    assert "FileNotFoundError" in errors[0]
+    assert "platform=" in errors[0]
+    assert messages[-1] == f"Model Health Assistant: {errors[0]}\n"
 
 
 def test_local_report_helpers_open_only_folder_and_copy_complete_path(tmp_path) -> None:
@@ -425,6 +424,33 @@ def test_local_report_helpers_open_only_folder_and_copy_complete_path(tmp_path) 
     )
     assert ui._open_report_folder_with_qt(complete_path, qt_core, qt_gui) is None
     assert opened_urls == [("local-directory", str(report_file.parent.resolve()))]
+
+    failed_qt_gui = SimpleNamespace(
+        QDesktopServices=SimpleNamespace(openUrl=lambda _url: False)
+    )
+    failed_message = ui._open_report_folder_with_qt(
+        complete_path,
+        qt_core,
+        failed_qt_gui,
+    )
+    assert failed_message is not None
+    assert str(report_file.parent.resolve()) in failed_message
+    assert "platform=" in failed_message
+
+    class FailingUrl:
+        @staticmethod
+        def fromLocalFile(_path: str):  # noqa: N802 - mirrors Qt.
+            raise RuntimeError("simulated Qt URL failure")
+
+    exception_message = ui._open_report_folder_with_qt(
+        complete_path,
+        SimpleNamespace(QUrl=FailingUrl),
+        qt_gui,
+    )
+    assert exception_message is not None
+    assert str(report_file.parent.resolve()) in exception_message
+    assert "RuntimeError" in exception_message
+    assert "platform=" in exception_message
 
     copied_text = []
     clipboard = SimpleNamespace(setText=copied_text.append)
