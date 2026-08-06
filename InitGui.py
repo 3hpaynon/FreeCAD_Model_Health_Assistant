@@ -27,7 +27,7 @@ def ensure_src_on_path(
     active_app = _app_module
     if plugin_root is None and active_app is None:
         try:
-            import FreeCAD as active_app  # type: ignore
+            active_app = __import__("FreeCAD")
         except Exception:  # pragma: no cover - expected outside FreeCAD.
             active_app = None
 
