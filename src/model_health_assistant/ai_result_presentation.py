@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from model_health_assistant.ai_consent import AIRequestReview
 from model_health_assistant.ai_models import AIExplanationResponse
 from model_health_assistant.ai_traceability import AIResponseTraceability
@@ -15,6 +17,14 @@ AI_ADVISORY_DISCLAIMER = (
     "context. They do not verify geometry, prove model correctness, or replace "
     "engineering judgment. No model changes or actions were performed."
 )
+
+
+@dataclass(frozen=True, slots=True)
+class FullAnalysisExplanationDisplay:
+    """User-facing advisory text plus retained technical request metadata."""
+
+    explanation_text: str
+    technical_details: str
 
 
 def format_selected_warning_explanation(
@@ -112,6 +122,7 @@ def format_full_analysis_explanation(
     review: AIRequestReview,
     *,
     traceability: AIResponseTraceability | None = None,
+    include_technical_metadata: bool = True,
 ) -> str:
     """Format one full response in the reviewed request's warning order."""
 
@@ -150,19 +161,20 @@ def format_full_analysis_explanation(
                 "The provider did not receive omitted warnings or truncated material.",
             )
         )
-    lines.extend(
-        [
-        *_provider_metadata_lines(response, review),
-        *_response_traceability_lines(response, review, traceability),
-        "",
-        "REVIEWED CONTEXT COVERAGE",
-        f"Warnings in completed analysis: {metadata.original_warning_count}",
-        f"Warnings included in request: {metadata.included_warning_count}",
-        f"Warnings omitted by limits/scope: {metadata.omitted_warning_count}",
-        f"Context truncated: {'Yes' if metadata.was_truncated else 'No'}",
-        f"Truncated fields: {metadata.truncated_field_count}",
-        ]
-    )
+    if include_technical_metadata:
+        lines.extend(
+            [
+                *_provider_metadata_lines(response, review),
+                *_response_traceability_lines(response, review, traceability),
+                "",
+                "REVIEWED CONTEXT COVERAGE",
+                f"Warnings in completed analysis: {metadata.original_warning_count}",
+                f"Warnings included in request: {metadata.included_warning_count}",
+                f"Warnings omitted by limits/scope: {metadata.omitted_warning_count}",
+                f"Context truncated: {'Yes' if metadata.was_truncated else 'No'}",
+                f"Truncated fields: {metadata.truncated_field_count}",
+            ]
+        )
     if metadata.was_truncated or metadata.omitted_warning_count:
         lines.append(
             "Limit acknowledgment: This explanation covers only the reviewed "
@@ -173,7 +185,7 @@ def format_full_analysis_explanation(
     lines.extend(
         (
             "",
-            "SUMMARY",
+            "SUMMARY" if include_technical_metadata else "OVERALL ASSESSMENT",
             response.overall_summary,
             "",
             "KEY CONCERNS (SUGGESTED MANUAL REVIEW ORDER)",
@@ -275,6 +287,40 @@ def format_full_analysis_explanation(
     lines.extend(f"- {item}" for item in response.limitations)
     lines.extend(("", "DISCLAIMER", AI_ADVISORY_DISCLAIMER))
     return "\n".join(lines)
+
+
+def build_full_analysis_explanation_display(
+    response: AIExplanationResponse,
+    review: AIRequestReview,
+    *,
+    traceability: AIResponseTraceability | None = None,
+) -> FullAnalysisExplanationDisplay:
+    """Build the two views used by the full-analysis AI tab."""
+
+    explanation_text = format_full_analysis_explanation(
+        response,
+        review,
+        traceability=traceability,
+        include_technical_metadata=False,
+    )
+    metadata = review.request.context.metadata
+    technical_lines = [
+        "PROVIDER AND REQUEST",
+        *_provider_metadata_lines(response, review),
+        "",
+        *_response_traceability_lines(response, review, traceability),
+        "",
+        "REVIEWED CONTEXT COVERAGE",
+        f"Warnings in completed analysis: {metadata.original_warning_count}",
+        f"Warnings included in request: {metadata.included_warning_count}",
+        f"Warnings omitted by limits/scope: {metadata.omitted_warning_count}",
+        f"Context truncated: {'Yes' if metadata.was_truncated else 'No'}",
+        f"Truncated fields: {metadata.truncated_field_count}",
+    ]
+    return FullAnalysisExplanationDisplay(
+        explanation_text=explanation_text,
+        technical_details="\n".join(technical_lines),
+    )
 
 
 def format_grounded_question_response(
@@ -421,6 +467,8 @@ def _response_traceability_lines(
 
 __all__ = [
     "AI_ADVISORY_DISCLAIMER",
+    "FullAnalysisExplanationDisplay",
+    "build_full_analysis_explanation_display",
     "format_full_analysis_explanation",
     "format_grounded_question_response",
     "format_selected_warning_explanation",

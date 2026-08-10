@@ -176,7 +176,7 @@ def test_results_dialog_controller_formats_summary_and_reopens() -> None:
     assert labels["meaningful_features"].text == "4"
     assert labels["sketches"].text == "2"
     assert labels["warnings"].text == "3"
-    assert labels["report"].text == str(Path("reports/demo.json"))
+    assert labels["report"].text == "Generated"
     assert dialog.show_count == 2
     assert dialog.raise_count == 2
     assert dialog.activate_count == 2
@@ -228,6 +228,137 @@ def test_results_dialog_controller_marks_missing_report_path() -> None:
     controller.update_presentation(_presentation(report_path=None))
 
     assert values["report"] == "Not available"
+
+
+def test_results_controller_updates_issue_count_label() -> None:
+    issue_counts = []
+    controller = ui._ResultsDialogController(
+        SimpleNamespace(),
+        {},
+        issue_count_label=SimpleNamespace(setText=issue_counts.append),
+    )
+
+    controller.update_presentation(_presentation(total_warning_count=1))
+    controller.update_presentation(_presentation(total_warning_count=4))
+
+    assert issue_counts == ["1 issue", "4 issues"]
+
+
+def test_results_tabs_use_overview_issues_ai_order() -> None:
+    class FakeTabs:
+        def __init__(self, parent) -> None:
+            self.parent = parent
+            self.pages = []
+
+        def addTab(self, page, title: str) -> None:  # noqa: N802 - mirrors Qt.
+            self.pages.append((page, title))
+
+    parent = object()
+    pages = (object(), object(), object())
+
+    tabs = ui._create_results_tabs(
+        SimpleNamespace(QTabWidget=FakeTabs),
+        parent,
+        pages,
+    )
+
+    assert tabs.parent is parent
+    assert tabs.pages == list(zip(pages, ("Overview", "Issues", "AI")))
+
+
+def test_overview_tab_uses_all_existing_summary_fields_without_report_path() -> None:
+    class FakeFont:
+        def __init__(self) -> None:
+            self.bold = False
+            self.point_size = 10
+
+        def setBold(self, bold: bool) -> None:  # noqa: N802 - mirrors Qt.
+            self.bold = bold
+
+        def pointSize(self) -> int:  # noqa: N802 - mirrors Qt.
+            return self.point_size
+
+        def setPointSize(self, size: int) -> None:  # noqa: N802 - mirrors Qt.
+            self.point_size = size
+
+    class FakeWidget:
+        def __init__(self, parent=None) -> None:
+            self.parent = parent
+
+    class FakeLabel(FakeWidget):
+        def __init__(self, text: str, parent=None) -> None:
+            super().__init__(parent)
+            self.text = text
+            self.word_wrap = False
+            self.alignment = None
+            self.label_font = FakeFont()
+
+        def setWordWrap(self, enabled: bool) -> None:  # noqa: N802
+            self.word_wrap = enabled
+
+        def font(self):
+            return self.label_font
+
+        def setFont(self, font) -> None:  # noqa: N802
+            self.label_font = font
+
+        def setAlignment(self, alignment) -> None:  # noqa: N802
+            self.alignment = alignment
+
+    class FakeLayout:
+        def __init__(self, parent=None) -> None:
+            self.parent = parent
+            self.items = []
+
+        def setSpacing(self, spacing: int) -> None:  # noqa: N802
+            self.spacing = spacing
+
+        def addWidget(self, widget) -> None:  # noqa: N802
+            self.items.append(widget)
+
+        def addLayout(self, child) -> None:  # noqa: N802
+            self.items.append(child)
+
+        def addStretch(self) -> None:  # noqa: N802
+            self.items.append("stretch")
+
+        def addRow(self, caption: str, widget) -> None:  # noqa: N802
+            self.items.append((caption, widget))
+
+    qt_widgets = SimpleNamespace(
+        QWidget=FakeWidget,
+        QLabel=FakeLabel,
+        QGroupBox=lambda title, parent: FakeWidget(parent),
+        QVBoxLayout=FakeLayout,
+        QHBoxLayout=FakeLayout,
+        QFormLayout=FakeLayout,
+    )
+
+    tab, labels = ui._create_overview_tab(
+        qt_widgets,
+        SimpleNamespace(Qt=SimpleNamespace(AlignCenter="center")),
+        object(),
+    )
+
+    assert isinstance(tab, FakeWidget)
+    assert set(labels) == {
+        "document",
+        "timestamp",
+        "score",
+        "document_objects",
+        "meaningful_features",
+        "sketches",
+        "warnings",
+        "high_warnings",
+        "medium_warnings",
+        "low_warnings",
+        "report",
+    }
+    assert labels["document"].label_font.bold is True
+    assert labels["score"].label_font.bold is True
+    assert labels["score"].label_font.point_size == 18
+    assert labels["score"].alignment == "center"
+    assert ui._summary_display_values(_presentation())["report"] == "Generated"
 
 
 def test_results_dialog_status_replaces_and_clears_concise_messages() -> None:
@@ -832,7 +963,7 @@ def test_warning_details_follow_selection_and_clear_on_update_or_no_selection() 
         _presentation(warning_items=warning_items, total_warning_count=2)
     )
     assert controller.warning_items == warning_items
-    assert warning_details.text == ""
+    assert warning_details.text == "Select an issue to view details."
 
     warning_table.selected_row = 1
     controller.update_selected_warning_details()
@@ -840,13 +971,13 @@ def test_warning_details_follow_selection_and_clear_on_update_or_no_selection() 
 
     warning_table.selected_row = None
     controller.update_selected_warning_details()
-    assert warning_details.text == ""
+    assert warning_details.text == "Select an issue to view details."
 
     warning_table.selected_row = 0
     controller.update_selected_warning_details()
     controller.update_presentation(_presentation(total_warning_count=0))
     assert controller.warning_items == ()
-    assert warning_details.text == ""
+    assert warning_details.text == "Select an issue to view details."
 
 
 def test_internal_name_selection_targets_original_document_without_model_access() -> None:
@@ -1412,13 +1543,85 @@ def test_full_analysis_action_requires_report_provider_and_idle_not_warning_sele
     assert "Provider unavailable" in messages["text"]
 
 
+def test_full_analysis_result_uses_ai_tab_and_collapsible_technical_details() -> None:
+    class FakeTextView:
+        def __init__(self) -> None:
+            self.text = ""
+            self.visible = True
+
+        def setPlainText(self, text: str) -> None:  # noqa: N802
+            self.text = text
+
+        def setVisible(self, visible: bool) -> None:  # noqa: N802
+            self.visible = visible
+
+    class FakeButton:
+        def __init__(self) -> None:
+            self.text = ""
+            self.checked = False
+            self.enabled = False
+
+        def setText(self, text: str) -> None:  # noqa: N802
+            self.text = text
+
+        def setChecked(self, checked: bool) -> None:  # noqa: N802
+            self.checked = checked
+
+        def setEnabled(self, enabled: bool) -> None:  # noqa: N802
+            self.enabled = enabled
+
+    container = SimpleNamespace(visible=False)
+    container.setVisible = lambda visible: setattr(container, "visible", visible)
+    explanation_view = FakeTextView()
+    technical_view = FakeTextView()
+    technical_button = FakeButton()
+    tabs = SimpleNamespace(current_index=None)
+    tabs.setCurrentIndex = lambda index: setattr(tabs, "current_index", index)
+    controller = ui._ResultsDialogController(
+        SimpleNamespace(),
+        {},
+        ai_results_container=container,
+        ai_explanation_view=explanation_view,
+        ai_technical_button=technical_button,
+        ai_technical_view=technical_view,
+        results_tabs=tabs,
+    )
+
+    controller.show_full_analysis_result(
+        "Overall assessment and recommendations.",
+        "Provider and traceability metadata.",
+    )
+
+    assert explanation_view.text == "Overall assessment and recommendations."
+    assert technical_view.text == "Provider and traceability metadata."
+    assert technical_view.visible is False
+    assert technical_button.text == "View Technical Details"
+    assert technical_button.enabled is True
+    assert container.visible is True
+    assert tabs.current_index == 2
+
+    controller.toggle_ai_technical_details(True)
+    assert technical_view.visible is True
+    assert technical_button.checked is True
+    assert technical_button.text == "Hide Technical Details"
+
+    controller.update_presentation(_presentation())
+    assert explanation_view.text == ""
+    assert technical_view.text == ""
+    assert container.visible is False
+
+
 def test_results_request_cancel_rejects_late_and_older_callbacks(monkeypatch) -> None:
     class FakeButton:
         def __init__(self) -> None:
             self.enabled = False
+            self.visible = False
 
         def setEnabled(self, enabled: bool) -> None:  # noqa: N802
             self.enabled = enabled
+
+        def setVisible(self, visible: bool) -> None:  # noqa: N802
+            self.visible = visible
 
     class FakeHandle:
         def __init__(self) -> None:
@@ -1473,11 +1676,13 @@ def test_results_request_cancel_rejects_late_and_older_callbacks(monkeypatch) ->
     first_ticket = controller.active_ai_ticket
     assert type(first_ticket) is int
     assert cancel_button.enabled is True
+    assert cancel_button.visible is True
 
     assert controller.cancel_ai_operation() is True
     cancelled_status = messages["text"]
     assert launched[0][3].cancelled is True
     assert cancel_button.enabled is False
+    assert cancel_button.visible is False
     launched[0][1]("late first result")
     launched[0][2](RuntimeError("late first failure"))
     assert delivered == []

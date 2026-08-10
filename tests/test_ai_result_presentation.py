@@ -9,6 +9,7 @@ from model_health_assistant.ai_models import (
 )
 from model_health_assistant.ai_result_presentation import (
     AI_ADVISORY_DISCLAIMER,
+    build_full_analysis_explanation_display,
     format_full_analysis_explanation,
     format_selected_warning_explanation,
 )
@@ -201,6 +202,40 @@ def test_full_analysis_formats_many_explanations_in_reviewed_source_order() -> N
     assert "Included warnings explained: 3 of 3" in text
     assert "Included warnings without an explanation: 0" in text
     assert "No model changes or actions were performed." in text
+
+
+def test_full_analysis_display_prioritizes_explanation_and_retains_metadata() -> None:
+    review = _full_review(_full_report(1))
+    warning = review.request.context.warnings[0]
+    response = AIExplanationResponse(
+        provider_identifier="openai",
+        provider_display_name="OpenAI",
+        overall_summary="Review the reported feature manually.",
+        warning_explanations=[_explanation_for(warning)],
+        limitations=["Only the reviewed context was available."],
+        request_identifier="resp_full_display",
+        actual_model_identifier="gpt-5.6-terra-2026-08-01",
+        usage=AIUsageMetadata(input_tokens=20, output_tokens=10, total_tokens=30),
+    )
+
+    display = build_full_analysis_explanation_display(response, review)
+
+    assert "OVERALL ASSESSMENT" in display.explanation_text
+    assert "Review the reported feature manually." in display.explanation_text
+    assert "KEY CONCERNS" in display.explanation_text
+    assert "Provider:" not in display.explanation_text
+    assert "Request ID:" not in display.explanation_text
+    assert "Provider: OpenAI (openai)" in display.technical_details
+    assert "Configured model: gpt-5.6-terra" in display.technical_details
+    assert "Actual model: gpt-5.6-terra-2026-08-01" in display.technical_details
+    assert "Request ID: resp_full_display" in display.technical_details
+    assert "Usage: input=20, output=10, total=30" in display.technical_details
+    assert "Traceability:" in display.technical_details
+    assert "Request context fingerprint:" in display.technical_details
+    assert "Response schema version:" in display.technical_details
+    assert "Prompt-template version:" in display.technical_details
+    assert "Context schema version:" in display.technical_details
+    assert "REVIEWED CONTEXT COVERAGE" in display.technical_details
 
 
 @pytest.mark.parametrize("warning_count", [0, 1])

@@ -40,7 +40,9 @@ COMMAND_NAME = "MHA_AnalyzeFeatureTree"
 
 _WARNING_TABLE_HEADERS = ("Severity", "Feature", "Rule", "Warning")
 _WARNING_COLUMN_WIDTHS = (85, 170, 190)
+_RESULT_TAB_TITLES = ("Overview", "Issues", "AI")
 _NO_WARNINGS_MESSAGE = "No model-health warnings were generated."
+_SELECT_ISSUE_MESSAGE = "Select an issue to view details."
 _HEALTH_SCORE_DISCLAIMER = (
     "The health score is a rule-based engineering aid and does not guarantee "
     "that the model is error-free."
@@ -207,6 +209,13 @@ class _ResultsDialogController:
         ask_about_analysis_handler: Any | None = None,
         cancel_ai_request_button: Any | None = None,
         ai_workflow_status_handler: Any | None = None,
+        issue_count_label: Any | None = None,
+        ai_status_label: Any | None = None,
+        ai_results_container: Any | None = None,
+        ai_explanation_view: Any | None = None,
+        ai_technical_button: Any | None = None,
+        ai_technical_view: Any | None = None,
+        results_tabs: Any | None = None,
     ) -> None:
         self.dialog = dialog
         self.value_labels = value_labels
@@ -236,6 +245,13 @@ class _ResultsDialogController:
         self.ask_about_analysis_handler = ask_about_analysis_handler
         self.cancel_ai_request_button = cancel_ai_request_button
         self.ai_workflow_status_handler = ai_workflow_status_handler
+        self.issue_count_label = issue_count_label
+        self.ai_status_label = ai_status_label
+        self.ai_results_container = ai_results_container
+        self.ai_explanation_view = ai_explanation_view
+        self.ai_technical_button = ai_technical_button
+        self.ai_technical_view = ai_technical_view
+        self.results_tabs = results_tabs
         self._ai_request_state = AIRequestStateController()
         self._active_ai_ticket: int | None = None
         self._ai_operation_running = False
@@ -268,6 +284,8 @@ class _ResultsDialogController:
         self._set_preview_ai_context_enabled(report is not None)
         self._set_test_mock_explanation_enabled(report is not None)
         self._refresh_ai_action_state()
+        self._set_issue_count(presentation.total_warning_count)
+        self._reset_ai_presentation()
         self.update_status(status_message)
         self._update_warning_table(presentation)
 
@@ -286,7 +304,7 @@ class _ResultsDialogController:
     def _update_warning_table(self, presentation: AnalysisPresentation) -> None:
         self.warning_items = tuple(presentation.warning_items)
         warning_items = self.warning_items
-        self._set_warning_details("")
+        self._set_warning_details(_SELECT_ISSUE_MESSAGE)
         self._set_select_feature_enabled(False)
         if self.empty_warning_label is not None:
             set_text = getattr(self.empty_warning_label, "setText", None)
@@ -324,7 +342,7 @@ class _ResultsDialogController:
     def update_selected_warning_details(self) -> None:
         """Show selected details and enable selection only for a valid target."""
 
-        self._set_warning_details("")
+        self._set_warning_details(_SELECT_ISSUE_MESSAGE)
         self._set_select_feature_enabled(False)
         self._refresh_ai_action_state()
         warning = self._selected_warning()
@@ -512,6 +530,9 @@ class _ResultsDialogController:
         self.update_status(
             "Opened final review for the selected warning. No data was transmitted."
         )
+        self._set_ai_status(
+            "Reviewing a selected-issue request. Nothing has been sent."
+        )
         return True
 
     def explain_full_analysis(self, *_args: Any) -> bool:
@@ -553,6 +574,9 @@ class _ResultsDialogController:
             "Opened a fresh final review for the full analysis. No data was "
             "transmitted."
         )
+        self._set_ai_status(
+            "Reviewing a full-analysis request. Nothing has been sent."
+        )
         return True
 
     def ask_about_analysis(self, *_args: Any) -> bool:
@@ -593,6 +617,9 @@ class _ResultsDialogController:
         self.update_status(
             "Opened final review for one grounded question. No data was transmitted."
         )
+        self._set_ai_status(
+            "Reviewing a grounded question. Nothing has been sent."
+        )
         return True
 
     @property
@@ -624,6 +651,7 @@ class _ResultsDialogController:
         self.update_status(
             f"{message} Request: {request_type}; provider: {provider_identifier}."
         )
+        self._set_ai_status(message)
         return True
 
     def attach_ai_operation(self, ticket: object, operation: object) -> bool:
@@ -669,6 +697,7 @@ class _ResultsDialogController:
         self._active_ai_ticket = None
         self._refresh_ai_action_state()
         self.update_status(message)
+        self._set_ai_status(message)
         return True
 
     def cancel_ai_operation(self, *_args: Any) -> bool:
@@ -691,6 +720,7 @@ class _ResultsDialogController:
             "Request cancelled. A provider operation already in progress may finish "
             "in the background, but its result will not be displayed."
         )
+        self._set_ai_status("Request cancelled. No result will be displayed.")
         return True
 
     def detach_ai_operation(self, *_args: Any) -> None:
@@ -787,6 +817,81 @@ class _ResultsDialogController:
         if callable(set_enabled):
             set_enabled(enabled)
 
+    def _set_issue_count(self, count: int) -> None:
+        set_text = getattr(self.issue_count_label, "setText", None)
+        if callable(set_text):
+            noun = "issue" if count == 1 else "issues"
+            set_text(f"{count} {noun}")
+
+    def _set_ai_status(self, text: str) -> None:
+        set_text = getattr(self.ai_status_label, "setText", None)
+        if callable(set_text):
+            set_text(text)
+
+    def _reset_ai_presentation(self) -> None:
+        self._set_ai_status("No AI analysis has been requested yet.")
+        self._set_read_only_text(self.ai_explanation_view, "")
+        self._set_read_only_text(self.ai_technical_view, "")
+        set_enabled = getattr(self.ai_technical_button, "setEnabled", None)
+        if callable(set_enabled):
+            set_enabled(False)
+        set_visible = getattr(self.ai_results_container, "setVisible", None)
+        if callable(set_visible):
+            set_visible(False)
+        self._set_ai_technical_details_visible(False)
+
+    def show_full_analysis_result(
+        self,
+        explanation_text: str,
+        technical_details: str,
+    ) -> None:
+        """Display validated full-analysis text without altering the model."""
+
+        self._set_read_only_text(self.ai_explanation_view, explanation_text)
+        self._set_read_only_text(self.ai_technical_view, technical_details)
+        set_visible = getattr(self.ai_results_container, "setVisible", None)
+        if callable(set_visible):
+            set_visible(True)
+        set_enabled = getattr(self.ai_technical_button, "setEnabled", None)
+        if callable(set_enabled):
+            set_enabled(bool(technical_details))
+        self._set_ai_technical_details_visible(False)
+        set_current_index = getattr(self.results_tabs, "setCurrentIndex", None)
+        if callable(set_current_index):
+            set_current_index(2)
+
+    def toggle_ai_technical_details(
+        self,
+        checked: bool = False,
+        *_args: Any,
+    ) -> None:
+        self._set_ai_technical_details_visible(bool(checked))
+
+    def _set_ai_technical_details_visible(self, visible: bool) -> None:
+        set_visible = getattr(self.ai_technical_view, "setVisible", None)
+        if callable(set_visible):
+            set_visible(visible)
+        set_checked = getattr(self.ai_technical_button, "setChecked", None)
+        if callable(set_checked):
+            set_checked(visible)
+        set_text = getattr(self.ai_technical_button, "setText", None)
+        if callable(set_text):
+            set_text(
+                "Hide Technical Details"
+                if visible
+                else "View Technical Details"
+            )
+
+    @staticmethod
+    def _set_read_only_text(widget: Any, text: str) -> None:
+        set_plain_text = getattr(widget, "setPlainText", None)
+        if callable(set_plain_text):
+            set_plain_text(text)
+            return
+        set_text = getattr(widget, "setText", None)
+        if callable(set_text):
+            set_text(text)
+
     def _set_report_actions_enabled(self, enabled: bool) -> None:
         buttons_and_handlers = (
             (self.open_report_folder_button, self.open_report_folder_handler),
@@ -853,6 +958,9 @@ class _ResultsDialogController:
         set_enabled = getattr(cancel_button, "setEnabled", None)
         if callable(set_enabled):
             set_enabled(self._ai_operation_running)
+        set_visible = getattr(cancel_button, "setVisible", None)
+        if callable(set_visible):
+            set_visible(self._ai_operation_running)
 
         full_enabled = (
             self.report is not None
@@ -1187,67 +1295,163 @@ def _format_report_view_summary(
 
 def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogController:
     dialog = qt_widgets.QDialog(parent)
-    dialog.setWindowTitle("Model Health Assistant Results")
+    dialog.setWindowTitle("Model Health Assistant")
     dialog.setModal(False)
     dialog.setMinimumSize(760, 560)
 
     layout = qt_widgets.QVBoxLayout(dialog)
     if hasattr(layout, "setSpacing"):
         layout.setSpacing(8)
-    form_layout = qt_widgets.QFormLayout()
-    layout.addLayout(form_layout)
 
-    value_labels: dict[str, Any] = {}
-    rows = (
-        ("document", "Document:"),
-        ("timestamp", "Analysis timestamp:"),
-        ("score", "Health score:"),
-        ("document_objects", "Document objects:"),
-        ("meaningful_features", "Meaningful modeling features:"),
-        ("sketches", "Sketches:"),
-        ("warnings", "Total warnings:"),
-        ("high_warnings", "High-severity warnings:"),
-        ("medium_warnings", "Medium-severity warnings:"),
-        ("low_warnings", "Low-severity warnings:"),
-        ("report", "Report:"),
+    qt_services = _load_qt_services()
+    qt_core = qt_services[0] if qt_services is not None else None
+
+    overview_tab, value_labels = _create_overview_tab(
+        qt_widgets,
+        qt_core,
+        dialog,
     )
-    for key, caption in rows:
-        value_label = qt_widgets.QLabel("", dialog)
-        if key == "report" and hasattr(value_label, "setWordWrap"):
-            value_label.setWordWrap(True)
-        value_labels[key] = value_label
-        form_layout.addRow(caption, value_label)
+
+    issues_tab = qt_widgets.QWidget(dialog)
+    issues_layout = qt_widgets.QVBoxLayout(issues_tab)
+
+    issues_header_layout = qt_widgets.QHBoxLayout()
+    issues_heading = qt_widgets.QLabel("Issues", issues_tab)
+    issue_count_label = qt_widgets.QLabel("0 issues", issues_tab)
+    issues_header_layout.addWidget(issues_heading)
+    issues_header_layout.addStretch()
+    issues_header_layout.addWidget(issue_count_label)
+    issues_layout.addLayout(issues_header_layout)
 
     status_label = qt_widgets.QLabel("", dialog)
     if hasattr(status_label, "setWordWrap"):
         status_label.setWordWrap(True)
     status_label.setVisible(False)
-    layout.addWidget(status_label)
 
-    warning_table = qt_widgets.QTableWidget(dialog)
+    warning_table = qt_widgets.QTableWidget(issues_tab)
     _configure_warning_table(qt_widgets, warning_table)
-    layout.addWidget(warning_table)
 
-    empty_warning_label = qt_widgets.QLabel(_NO_WARNINGS_MESSAGE, dialog)
+    empty_warning_label = qt_widgets.QLabel(_NO_WARNINGS_MESSAGE, issues_tab)
     empty_warning_label.setVisible(False)
-    layout.addWidget(empty_warning_label)
 
-    details_label = qt_widgets.QLabel("Warning details:", dialog)
-    layout.addWidget(details_label)
-    warning_details = qt_widgets.QPlainTextEdit(dialog)
+    details_group = qt_widgets.QGroupBox("Selected issue", issues_tab)
+    details_layout = qt_widgets.QVBoxLayout(details_group)
+    warning_details = qt_widgets.QPlainTextEdit(details_group)
     warning_details.setReadOnly(True)
-    warning_details.setMinimumHeight(140)
-    layout.addWidget(warning_details)
+    warning_details.setPlainText(_SELECT_ISSUE_MESSAGE)
+    warning_details.setMinimumHeight(120)
+    details_layout.addWidget(warning_details)
 
-    disclaimer_label = qt_widgets.QLabel(_HEALTH_SCORE_DISCLAIMER, dialog)
-    if hasattr(disclaimer_label, "setWordWrap"):
-        disclaimer_label.setWordWrap(True)
-    layout.addWidget(disclaimer_label)
+    issue_action_layout = qt_widgets.QHBoxLayout()
+    select_feature_button = qt_widgets.QPushButton("Select Feature", details_group)
+    select_feature_button.setEnabled(False)
+    select_feature_button.setToolTip(
+        "Select the affected object in the analyzed FreeCAD document."
+    )
+    explain_selected_warning_button = qt_widgets.QPushButton("Explain", details_group)
+    explain_selected_warning_button.setEnabled(False)
+    explain_selected_warning_button.setToolTip(
+        "Review a privacy-safe AI explanation request for this issue."
+    )
+    issue_action_layout.addWidget(select_feature_button)
+    issue_action_layout.addWidget(explain_selected_warning_button)
+    issue_action_layout.addStretch()
+    details_layout.addLayout(issue_action_layout)
 
-    set_stretch_factor = getattr(layout, "setStretchFactor", None)
+    splitter_class = getattr(qt_widgets, "QSplitter", None)
+    vertical = getattr(getattr(qt_core, "Qt", None), "Vertical", None)
+    if splitter_class is not None and vertical is not None:
+        issues_splitter = splitter_class(vertical, issues_tab)
+        issues_splitter.addWidget(warning_table)
+        issues_splitter.addWidget(details_group)
+        set_stretch_factor = getattr(issues_splitter, "setStretchFactor", None)
+        if callable(set_stretch_factor):
+            set_stretch_factor(0, 3)
+            set_stretch_factor(1, 2)
+        issues_layout.addWidget(issues_splitter)
+    else:
+        issues_layout.addWidget(warning_table)
+        issues_layout.addWidget(details_group)
+    issues_layout.addWidget(empty_warning_label)
+
+    ai_tab = qt_widgets.QWidget(dialog)
+    ai_layout = qt_widgets.QVBoxLayout(ai_tab)
+    ai_heading = qt_widgets.QLabel("AI Analysis", ai_tab)
+    _set_label_bold(ai_heading)
+    ai_layout.addWidget(ai_heading)
+    ai_description = qt_widgets.QLabel(
+        "AI explanations are read-only advisory text based only on the "
+        "privacy-safe context reviewed before sending.",
+        ai_tab,
+    )
+    if hasattr(ai_description, "setWordWrap"):
+        ai_description.setWordWrap(True)
+    ai_layout.addWidget(ai_description)
+
+    ai_status_group = qt_widgets.QGroupBox("Status", ai_tab)
+    ai_status_layout = qt_widgets.QVBoxLayout(ai_status_group)
+    ai_status_label = qt_widgets.QLabel(
+        "No AI analysis has been requested yet.",
+        ai_status_group,
+    )
+    if hasattr(ai_status_label, "setWordWrap"):
+        ai_status_label.setWordWrap(True)
+    ai_status_layout.addWidget(ai_status_label)
+    ai_layout.addWidget(ai_status_group)
+
+    ai_action_layout = qt_widgets.QHBoxLayout()
+    explain_full_analysis_button = qt_widgets.QPushButton(
+        "Explain Full Analysis",
+        ai_tab,
+    )
+    explain_full_analysis_button.setEnabled(False)
+    ask_about_analysis_button = qt_widgets.QPushButton(
+        "Ask About This Analysis",
+        ai_tab,
+    )
+    ask_about_analysis_button.setEnabled(False)
+    cancel_ai_request_button = qt_widgets.QPushButton("Cancel Request", ai_tab)
+    cancel_ai_request_button.setEnabled(False)
+    cancel_ai_request_button.setVisible(False)
+    cancel_ai_request_button.setToolTip(
+        "Logically cancel the active provider request without terminating its thread."
+    )
+    ai_action_layout.addWidget(explain_full_analysis_button)
+    ai_action_layout.addWidget(ask_about_analysis_button)
+    ai_action_layout.addWidget(cancel_ai_request_button)
+    ai_action_layout.addStretch()
+    ai_layout.addLayout(ai_action_layout)
+
+    ai_results_container = qt_widgets.QGroupBox("Full analysis", ai_tab)
+    ai_results_layout = qt_widgets.QVBoxLayout(ai_results_container)
+    ai_explanation_view = qt_widgets.QPlainTextEdit(ai_results_container)
+    ai_explanation_view.setReadOnly(True)
+    ai_results_layout.addWidget(ai_explanation_view)
+    ai_technical_button = qt_widgets.QPushButton(
+        "View Technical Details",
+        ai_results_container,
+    )
+    set_checkable = getattr(ai_technical_button, "setCheckable", None)
+    if callable(set_checkable):
+        set_checkable(True)
+    ai_results_layout.addWidget(ai_technical_button)
+    ai_technical_view = qt_widgets.QPlainTextEdit(ai_results_container)
+    ai_technical_view.setReadOnly(True)
+    ai_technical_view.setVisible(False)
+    ai_results_layout.addWidget(ai_technical_view)
+    ai_results_container.setVisible(False)
+    ai_layout.addWidget(ai_results_container)
+    set_stretch_factor = getattr(ai_layout, "setStretchFactor", None)
     if callable(set_stretch_factor):
-        set_stretch_factor(warning_table, 3)
-        set_stretch_factor(warning_details, 2)
+        set_stretch_factor(ai_results_container, 1)
+
+    tabs = _create_results_tabs(
+        qt_widgets,
+        dialog,
+        (overview_tab, issues_tab, ai_tab),
+    )
+    layout.addWidget(tabs)
+    layout.addWidget(status_label)
 
     button_layout = qt_widgets.QHBoxLayout()
     refresh_analysis_button = qt_widgets.QPushButton("Refresh Analysis", dialog)
@@ -1268,40 +1472,10 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
         dialog,
     )
     test_mock_explanation_button.setEnabled(False)
-    explain_selected_warning_button = qt_widgets.QPushButton(
-        "Explain Selected Warning",
-        dialog,
-    )
-    explain_selected_warning_button.setEnabled(False)
-    explain_full_analysis_button = qt_widgets.QPushButton(
-        "Explain Full Analysis",
-        dialog,
-    )
-    explain_full_analysis_button.setEnabled(False)
-    ask_about_analysis_button = qt_widgets.QPushButton(
-        "Ask About This Analysis",
-        dialog,
-    )
-    ask_about_analysis_button.setEnabled(False)
-    cancel_ai_request_button = qt_widgets.QPushButton(
-        "Cancel Request",
-        dialog,
-    )
-    cancel_ai_request_button.setEnabled(False)
-    cancel_ai_request_button.setToolTip(
-        "Logically cancel the active provider request without terminating its thread."
-    )
-    select_feature_button = qt_widgets.QPushButton("Select Feature", dialog)
-    select_feature_button.setEnabled(False)
-    button_layout.addWidget(select_feature_button)
     button_layout.addWidget(open_report_folder_button)
     button_layout.addWidget(copy_report_path_button)
     button_layout.addWidget(preview_ai_context_button)
     button_layout.addWidget(test_mock_explanation_button)
-    button_layout.addWidget(explain_selected_warning_button)
-    button_layout.addWidget(explain_full_analysis_button)
-    button_layout.addWidget(ask_about_analysis_button)
-    button_layout.addWidget(cancel_ai_request_button)
     button_layout.addWidget(refresh_analysis_button)
     button_layout.addStretch()
     close_button = qt_widgets.QPushButton("Close", dialog)
@@ -1310,12 +1484,10 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     button_layout.addWidget(close_button)
     layout.addLayout(button_layout)
 
-    qt_services = _load_qt_services()
-    qt_core = None
     open_report_folder_handler = None
     copy_report_path_handler = None
     if qt_services is not None:
-        qt_core, qt_gui = qt_services
+        qt_gui = qt_services[1]
         open_report_folder_handler = lambda path: _open_report_folder_with_qt(
             path,
             qt_core,
@@ -1400,6 +1572,13 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
         ai_workflow_status_handler=lambda active_controller: (
             _ai_workflow_status_for_controller(active_controller)
         ),
+        issue_count_label=issue_count_label,
+        ai_status_label=ai_status_label,
+        ai_results_container=ai_results_container,
+        ai_explanation_view=ai_explanation_view,
+        ai_technical_button=ai_technical_button,
+        ai_technical_view=ai_technical_view,
+        results_tabs=tabs,
     )
     _connect_warning_table_actions(warning_table, controller)
     select_feature_button.clicked.connect(controller.select_selected_feature)
@@ -1413,6 +1592,7 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     explain_full_analysis_button.clicked.connect(controller.explain_full_analysis)
     ask_about_analysis_button.clicked.connect(controller.ask_about_analysis)
     cancel_ai_request_button.clicked.connect(controller.cancel_ai_operation)
+    ai_technical_button.clicked.connect(controller.toggle_ai_technical_details)
     refresh_analysis_button.clicked.connect(controller.refresh_analysis)
     finished_signal = getattr(dialog, "finished", None)
     if finished_signal is not None and hasattr(finished_signal, "connect"):
@@ -1425,6 +1605,148 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
             )
         )
     return controller
+
+
+def _create_results_tabs(
+    qt_widgets: Any,
+    parent: Any,
+    pages: tuple[Any, Any, Any],
+) -> Any:
+    """Create the stable top-level results navigation in display order."""
+
+    tabs = qt_widgets.QTabWidget(parent)
+    for page, title in zip(pages, _RESULT_TAB_TITLES):
+        tabs.addTab(page, title)
+    return tabs
+
+
+def _create_overview_tab(
+    qt_widgets: Any,
+    qt_core: Any | None,
+    parent: Any,
+) -> tuple[Any, dict[str, Any]]:
+    """Create a compact summary using only the existing presentation fields."""
+
+    tab = qt_widgets.QWidget(parent)
+    layout = qt_widgets.QVBoxLayout(tab)
+    if hasattr(layout, "setSpacing"):
+        layout.setSpacing(10)
+
+    value_labels: dict[str, Any] = {}
+    document_label = qt_widgets.QLabel("", tab)
+    if hasattr(document_label, "setWordWrap"):
+        document_label.setWordWrap(True)
+    _set_label_bold(document_label)
+    value_labels["document"] = document_label
+    layout.addWidget(document_label)
+
+    score_label = qt_widgets.QLabel("", tab)
+    _set_label_emphasis(score_label)
+    _set_center_alignment(score_label, qt_core)
+    value_labels["score"] = score_label
+    layout.addWidget(score_label)
+
+    score_caption = qt_widgets.QLabel("MODEL HEALTH", tab)
+    _set_center_alignment(score_caption, qt_core)
+    layout.addWidget(score_caption)
+
+    issue_layout = qt_widgets.QHBoxLayout()
+    issue_layout.addStretch()
+    issue_caption = qt_widgets.QLabel("Issues:", tab)
+    issue_value = qt_widgets.QLabel("", tab)
+    _set_label_bold(issue_value)
+    value_labels["warnings"] = issue_value
+    issue_layout.addWidget(issue_caption)
+    issue_layout.addWidget(issue_value)
+    issue_layout.addStretch()
+    layout.addLayout(issue_layout)
+
+    severity_group = qt_widgets.QGroupBox("Severity", tab)
+    severity_layout = qt_widgets.QHBoxLayout(severity_group)
+    for key, caption in (
+        ("high_warnings", "High"),
+        ("medium_warnings", "Medium"),
+        ("low_warnings", "Low"),
+    ):
+        metric_layout = qt_widgets.QVBoxLayout()
+        metric_value = qt_widgets.QLabel("", severity_group)
+        metric_caption = qt_widgets.QLabel(caption, severity_group)
+        _set_center_alignment(metric_value, qt_core)
+        _set_center_alignment(metric_caption, qt_core)
+        value_labels[key] = metric_value
+        metric_layout.addWidget(metric_value)
+        metric_layout.addWidget(metric_caption)
+        severity_layout.addLayout(metric_layout)
+    layout.addWidget(severity_group)
+
+    counts_group = qt_widgets.QGroupBox("Model summary", tab)
+    counts_layout = qt_widgets.QHBoxLayout(counts_group)
+    for key, caption in (
+        ("document_objects", "Objects"),
+        ("meaningful_features", "Modeling features"),
+        ("sketches", "Sketches"),
+    ):
+        metric_layout = qt_widgets.QVBoxLayout()
+        metric_value = qt_widgets.QLabel("", counts_group)
+        metric_caption = qt_widgets.QLabel(caption, counts_group)
+        _set_center_alignment(metric_value, qt_core)
+        _set_center_alignment(metric_caption, qt_core)
+        value_labels[key] = metric_value
+        metric_layout.addWidget(metric_value)
+        metric_layout.addWidget(metric_caption)
+        counts_layout.addLayout(metric_layout)
+    layout.addWidget(counts_group)
+
+    footer_layout = qt_widgets.QFormLayout()
+    timestamp_label = qt_widgets.QLabel("", tab)
+    report_status_label = qt_widgets.QLabel("", tab)
+    value_labels["timestamp"] = timestamp_label
+    value_labels["report"] = report_status_label
+    footer_layout.addRow("Last analyzed:", timestamp_label)
+    footer_layout.addRow("Report:", report_status_label)
+    layout.addLayout(footer_layout)
+
+    disclaimer_label = qt_widgets.QLabel(_HEALTH_SCORE_DISCLAIMER, tab)
+    if hasattr(disclaimer_label, "setWordWrap"):
+        disclaimer_label.setWordWrap(True)
+    layout.addWidget(disclaimer_label)
+    layout.addStretch()
+    return tab, value_labels
+
+
+def _set_label_bold(label: Any) -> None:
+    font_method = getattr(label, "font", None)
+    set_font = getattr(label, "setFont", None)
+    if not callable(font_method) or not callable(set_font):
+        return
+    font = font_method()
+    set_bold = getattr(font, "setBold", None)
+    if callable(set_bold):
+        set_bold(True)
+        set_font(font)
+
+
+def _set_label_emphasis(label: Any) -> None:
+    font_method = getattr(label, "font", None)
+    set_font = getattr(label, "setFont", None)
+    if not callable(font_method) or not callable(set_font):
+        return
+    font = font_method()
+    point_size = getattr(font, "pointSize", lambda: 10)()
+    set_point_size = getattr(font, "setPointSize", None)
+    set_bold = getattr(font, "setBold", None)
+    if callable(set_point_size):
+        set_point_size(max(18, point_size + 8))
+    if callable(set_bold):
+        set_bold(True)
+    set_font(font)
+
+
+def _set_center_alignment(label: Any, qt_core: Any | None) -> None:
+    alignment = getattr(getattr(qt_core, "Qt", None), "AlignCenter", None)
+    set_alignment = getattr(label, "setAlignment", None)
+    if alignment is not None and callable(set_alignment):
+        set_alignment(alignment)
 
 
 def _build_ai_context_preview_json(report: ModelHealthReport) -> str:
@@ -2005,7 +2327,7 @@ def _full_explanation_succeeded(
     ticket: object | None = None,
 ) -> None:
     from model_health_assistant.ai_result_presentation import (
-        format_full_analysis_explanation,
+        build_full_analysis_explanation_display,
     )
     from model_health_assistant.ai_traceability import (
         build_ai_response_traceability,
@@ -2025,7 +2347,7 @@ def _full_explanation_succeeded(
             response,
             current_report,
         )
-        text = format_full_analysis_explanation(
+        display = build_full_analysis_explanation_display(
             response,
             review,
             traceability=traceability,
@@ -2046,11 +2368,9 @@ def _full_explanation_succeeded(
         ticket=ticket,
     ):
         return
-    _show_ai_explanation_text(
-        text,
-        "Full Analysis AI Explanation",
-        qt_widgets,
-        parent,
+    controller.show_full_analysis_result(
+        display.explanation_text,
+        display.technical_details,
     )
 
 
@@ -2449,7 +2769,7 @@ def _summary_display_values(
         "medium_warnings": str(presentation.medium_warning_count),
         "low_warnings": str(presentation.low_warning_count),
         "report": (
-            str(presentation.report_path)
+            "Generated"
             if presentation.report_path is not None
             else "Not available"
         ),
