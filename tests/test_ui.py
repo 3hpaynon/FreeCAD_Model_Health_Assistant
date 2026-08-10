@@ -266,6 +266,82 @@ def test_results_tabs_use_overview_issues_ai_order() -> None:
     assert tabs.pages == list(zip(pages, ("Overview", "Issues", "AI")))
 
 
+def test_more_menu_keeps_report_privacy_about_and_developer_actions() -> None:
+    class FakeAction:
+        def __init__(self, text: str) -> None:
+            self.text = text
+            self.enabled = True
+
+        def setEnabled(self, enabled: bool) -> None:  # noqa: N802
+            self.enabled = enabled
+
+    class FakeMenu:
+        def __init__(self, title_or_parent) -> None:
+            self.title_or_parent = title_or_parent
+            self.entries = []
+
+        def addMenu(self, title: str):  # noqa: N802
+            child = FakeMenu(title)
+            self.entries.append(child)
+            return child
+
+        def addAction(self, text: str):  # noqa: N802
+            action = FakeAction(text)
+            self.entries.append(action)
+            return action
+
+        def addSeparator(self) -> None:  # noqa: N802
+            self.entries.append("separator")
+
+    class FakeButton:
+        def __init__(self, text: str, parent) -> None:
+            self.text = text
+            self.parent = parent
+            self.tool_tip = ""
+            self.menu = None
+
+        def setToolTip(self, text: str) -> None:  # noqa: N802
+            self.tool_tip = text
+
+        def setMenu(self, menu) -> None:  # noqa: N802
+            self.menu = menu
+
+    parent = object()
+    controls = ui._create_more_menu(
+        SimpleNamespace(QPushButton=FakeButton, QMenu=FakeMenu),
+        parent,
+    )
+
+    assert controls.button.text == "More ▾"
+    assert controls.button.parent is parent
+    assert controls.button.menu is not None
+    assert controls.open_report_folder_action.text == "Open Report Folder"
+    assert controls.copy_report_path_action.text == "Copy Report Path"
+    assert controls.preview_ai_context_action.text == "Preview AI Context"
+    assert controls.about_analysis_action.text == "About This Analysis"
+    assert controls.test_mock_explanation_action.text == "Test Mock Explanation"
+    assert controls.open_report_folder_action.enabled is False
+    assert controls.copy_report_path_action.enabled is False
+    assert controls.preview_ai_context_action.enabled is False
+    assert controls.test_mock_explanation_action.enabled is False
+
+
+def test_about_analysis_preserves_methodology_and_disclaimers() -> None:
+    calls = []
+    qt_widgets = SimpleNamespace(
+        QMessageBox=SimpleNamespace(
+            information=lambda *args: calls.append(args),
+        )
+    )
+    parent = object()
+
+    assert ui._show_about_analysis(qt_widgets, parent) is True
+    assert calls[0][0] is parent
+    assert calls[0][1] == "About This Analysis"
+    assert ui._HEALTH_SCORE_DISCLAIMER in calls[0][2]
+    assert "does not modify the FreeCAD model" in calls[0][2]
+
+
 def test_overview_tab_uses_all_existing_summary_fields_without_report_path() -> None:
     class FakeFont:
         def __init__(self) -> None:
@@ -689,6 +765,9 @@ def test_warning_table_is_read_only_and_selects_single_rows() -> None:
         def setSortingEnabled(self, enabled: bool) -> None:  # noqa: N802
             calls["sorting"] = enabled
 
+        def setAlternatingRowColors(self, enabled: bool) -> None:  # noqa: N802
+            calls["alternating_rows"] = enabled
+
         def setColumnWidth(self, column: int, width: int) -> None:  # noqa: N802
             calls.setdefault("column_widths", []).append((column, width))
 
@@ -723,6 +802,7 @@ def test_warning_table_is_read_only_and_selects_single_rows() -> None:
         "column_count": 4,
         "headers": ["Severity", "Feature", "Rule", "Warning"],
         "sorting": False,
+        "alternating_rows": True,
         "column_widths": [(0, 85), (1, 170), (2, 190)],
         "stretch_last": True,
         "edit_triggers": "no-edit",
@@ -835,7 +915,7 @@ def test_warning_table_replaces_rows_and_handles_fallbacks_and_empty_state() -> 
     )
 
     assert warning_table.rows == []
-    assert empty_label.text == "No model-health warnings were generated."
+    assert empty_label.text == "No issues detected."
     assert empty_label.visible is True
 
 
@@ -977,7 +1057,7 @@ def test_warning_details_follow_selection_and_clear_on_update_or_no_selection() 
     controller.update_selected_warning_details()
     controller.update_presentation(_presentation(total_warning_count=0))
     assert controller.warning_items == ()
-    assert warning_details.text == "Select an issue to view details."
+    assert warning_details.text == "No issues detected."
 
 
 def test_internal_name_selection_targets_original_document_without_model_access() -> None:
@@ -1793,6 +1873,24 @@ def test_ai_context_preview_json_is_allowlisted_readable_and_local(monkeypatch) 
     assert ".FCStd" not in preview_json
 
 
+def test_ai_request_review_summary_matches_the_exact_privacy_payload() -> None:
+    review = ui._build_ai_context_preview_review(_ai_preview_report())
+
+    summary = ui._format_ai_request_review_summary(review)
+
+    assert "Nothing has been sent yet." in summary
+    assert "Health score: 70/100" in summary
+    assert "Model-health warnings: 1 of 1 included" in summary
+    assert "subtractive_feature: 1" in summary
+    assert "Local Mock Provider" in summary
+    assert "deterministic-local-v1" in summary
+    assert "No raw CAD file is being sent." in summary
+    assert "No CAD geometry is being sent." in summary
+    assert "The original document name is excluded." in summary
+    assert "private-user" not in summary
+    assert ".FCStd" not in summary
+
+
 def test_results_controller_previews_exact_retained_report() -> None:
     class FakeButton:
         def __init__(self) -> None:
@@ -1862,13 +1960,15 @@ def test_context_preview_reuses_one_dialog_controller(monkeypatch) -> None:
     class FakePreviewController:
         def __init__(self) -> None:
             self.texts = []
+            self.handlers = []
             self.show_count = 0
 
         def update_text(self, text: str) -> None:
             self.texts.append(text)
 
-        def update_review(self, review, _handler) -> None:
+        def update_review(self, review, handler) -> None:
             self.texts.append(review.preview_json())
+            self.handlers.append(handler)
 
         def show(self) -> None:
             self.show_count += 1
@@ -1891,6 +1991,7 @@ def test_context_preview_reuses_one_dialog_controller(monkeypatch) -> None:
     assert preview_controller.show_count == 2
     assert len(preview_controller.texts) == 2
     assert preview_controller.texts[0] == preview_controller.texts[1]
+    assert preview_controller.handlers == [None, None]
     ui._clear_ai_context_preview_dialog(preview_controller)
     assert ui._ai_context_preview_dialog is None
 
@@ -1978,12 +2079,16 @@ def test_ai_context_preview_dialog_is_parented_read_only_and_closable() -> None:
             self.parent = parent
             self.read_only = False
             self.text = ""
+            self.visible = True
 
         def setReadOnly(self, enabled: bool) -> None:  # noqa: N802
             self.read_only = enabled
 
         def setPlainText(self, text: str) -> None:  # noqa: N802
             self.text = text
+
+        def setVisible(self, visible: bool) -> None:  # noqa: N802
+            self.visible = visible
 
     class FakeButton:
         def __init__(self, text: str, parent) -> None:
@@ -1992,12 +2097,27 @@ def test_ai_context_preview_dialog_is_parented_read_only_and_closable() -> None:
             self.clicked = FakeSignal()
             self.shortcut = None
             self.enabled = True
+            self.checkable = False
+            self.checked = False
+            self.tool_tip = ""
 
         def setShortcut(self, shortcut: str) -> None:  # noqa: N802
             self.shortcut = shortcut
 
         def setEnabled(self, enabled: bool) -> None:  # noqa: N802
             self.enabled = enabled
+
+        def setCheckable(self, checkable: bool) -> None:  # noqa: N802
+            self.checkable = checkable
+
+        def setChecked(self, checked: bool) -> None:  # noqa: N802
+            self.checked = checked
+
+        def setText(self, text: str) -> None:  # noqa: N802
+            self.text = text
+
+        def setToolTip(self, text: str) -> None:  # noqa: N802
+            self.tool_tip = text
 
     labels = []
     text_views = []
@@ -2020,12 +2140,16 @@ def test_ai_context_preview_dialog_is_parented_read_only_and_closable() -> None:
     assert controller.dialog.modal is False
     assert labels[0].text == ui.AI_CONTEXT_PREVIEW_NOTICE
     assert labels[0].word_wrap is True
+    assert labels[1].word_wrap is True
     assert text_views[0].read_only is True
     assert text_views[0].text == '{"schema_version": "1.0"}'
-    assert buttons[0].text == "Cancel"
-    assert buttons[0].shortcut == "Esc"
-    assert buttons[1].text == "Send to Provider"
-    assert buttons[1].enabled is False
+    assert text_views[0].visible is False
+    assert buttons[0].text == "View Exact Request JSON"
+    assert buttons[0].checkable is True
+    assert buttons[1].text == "Cancel"
+    assert buttons[1].shortcut == "Esc"
+    assert buttons[2].text == "Send to Provider"
+    assert buttons[2].enabled is False
 
 
 def test_ai_context_preview_performs_no_network_access(monkeypatch) -> None:
@@ -2069,6 +2193,42 @@ def test_request_review_dialog_requires_explicit_send_or_cancel() -> None:
     controller.cancel()
     assert controller.consent.approved is False
     assert closed == [True, True]
+
+
+def test_request_review_exact_json_starts_collapsed_and_can_be_toggled() -> None:
+    exact_states = []
+    exact_labels = []
+    exact_checks = []
+    summary_text = []
+    displayed = []
+    controller = ui._AIRequestReviewDialogController(
+        SimpleNamespace(close=lambda: None),
+        SimpleNamespace(
+            setPlainText=displayed.append,
+            setVisible=exact_states.append,
+        ),
+        SimpleNamespace(setText=lambda _text: None),
+        SimpleNamespace(setEnabled=lambda _enabled: None),
+        SimpleNamespace(setText=summary_text.append),
+        SimpleNamespace(
+            setChecked=exact_checks.append,
+            setText=exact_labels.append,
+        ),
+    )
+    review = ui._build_ai_context_preview_review(_ai_preview_report())
+
+    controller.update_review(review, lambda _consent: None)
+
+    assert displayed[-1] == review.preview_json()
+    assert "Nothing has been sent yet." in summary_text[-1]
+    assert exact_states[-1] is False
+    assert exact_checks[-1] is False
+    assert exact_labels[-1] == "View Exact Request JSON"
+
+    controller.toggle_exact_request(True)
+    assert exact_states[-1] is True
+    assert exact_checks[-1] is True
+    assert exact_labels[-1] == "Hide Exact Request JSON"
 
 
 def test_results_controller_runs_mock_for_exact_retained_report() -> None:

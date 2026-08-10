@@ -41,15 +41,25 @@ COMMAND_NAME = "MHA_AnalyzeFeatureTree"
 _WARNING_TABLE_HEADERS = ("Severity", "Feature", "Rule", "Warning")
 _WARNING_COLUMN_WIDTHS = (85, 170, 190)
 _RESULT_TAB_TITLES = ("Overview", "Issues", "AI")
-_NO_WARNINGS_MESSAGE = "No model-health warnings were generated."
+_NO_WARNINGS_MESSAGE = "No issues detected."
 _SELECT_ISSUE_MESSAGE = "Select an issue to view details."
+_NO_AI_EXPLANATION_MESSAGE = "No AI explanation has been requested."
 _HEALTH_SCORE_DISCLAIMER = (
     "The health score is a rule-based engineering aid and does not guarantee "
     "that the model is error-free."
 )
+_ABOUT_ANALYSIS_TEXT = (
+    "Model Health Assistant analyzes the current FreeCAD document locally using "
+    "deterministic model-health rules. Its counts, warnings, severity levels, and "
+    "health score are a read-only snapshot of the completed analysis.\n\n"
+    + _HEALTH_SCORE_DISCLAIMER
+    + "\n\nAI explanations are optional, advisory, and based only on the privacy-safe "
+    "request you review before choosing Send to Provider. The assistant does not "
+    "modify the FreeCAD model."
+)
 AI_CONTEXT_PREVIEW_NOTICE = (
-    "Final privacy review. No data has been sent. The displayed request is the "
-    "exact request that may be transmitted only after Send to Provider."
+    "Final privacy review. Nothing has been sent. The exact request is available "
+    "below and may be transmitted only after Send to Provider."
 )
 MOCK_EXPLANATION_NOTICE = (
     "This explanation was produced by a deterministic local test provider. "
@@ -102,10 +112,14 @@ class _AIRequestReviewDialogController(_ReadOnlyTextDialogController):
         text_view: Any,
         status_label: Any,
         send_button: Any,
+        summary_label: Any | None = None,
+        exact_request_button: Any | None = None,
     ) -> None:
         super().__init__(dialog, text_view)
         self.status_label = status_label
         self.send_button = send_button
+        self.summary_label = summary_label
+        self.exact_request_button = exact_request_button
         self.consent = None
         self._send_handler = None
 
@@ -120,8 +134,32 @@ class _AIRequestReviewDialogController(_ReadOnlyTextDialogController):
         self.consent = AIRequestConsent(review)
         self._send_handler = send_handler
         self.update_text(review.preview_json())
+        set_summary = getattr(self.summary_label, "setText", None)
+        if callable(set_summary):
+            set_summary(_format_ai_request_review_summary(review))
+        self._set_exact_request_visible(False)
         self.status_label.setText("")
         self.send_button.setEnabled(callable(send_handler))
+
+    def toggle_exact_request(self, checked: bool = False, *_args: Any) -> None:
+        """Show or collapse the exact request without altering its contents."""
+
+        self._set_exact_request_visible(bool(checked))
+
+    def _set_exact_request_visible(self, visible: bool) -> None:
+        set_visible = getattr(self.text_view, "setVisible", None)
+        if callable(set_visible):
+            set_visible(visible)
+        set_checked = getattr(self.exact_request_button, "setChecked", None)
+        if callable(set_checked):
+            set_checked(visible)
+        set_text = getattr(self.exact_request_button, "setText", None)
+        if callable(set_text):
+            set_text(
+                "Hide Exact Request JSON"
+                if visible
+                else "View Exact Request JSON"
+            )
 
     def cancel(self, *_args: Any) -> None:
         if self.consent is not None:
@@ -146,6 +184,18 @@ class _AIRequestReviewDialogController(_ReadOnlyTextDialogController):
         self.update_text("")
         self.dialog.close()
         return True
+
+
+@dataclass(frozen=True, slots=True)
+class _MoreMenuControls:
+    """Actions retained under the results dialog's lower-frequency menu."""
+
+    button: Any
+    open_report_folder_action: Any
+    copy_report_path_action: Any
+    preview_ai_context_action: Any
+    about_analysis_action: Any
+    test_mock_explanation_action: Any
 
 
 class AnalyzeFeatureTreeCommand:
@@ -304,7 +354,9 @@ class _ResultsDialogController:
     def _update_warning_table(self, presentation: AnalysisPresentation) -> None:
         self.warning_items = tuple(presentation.warning_items)
         warning_items = self.warning_items
-        self._set_warning_details(_SELECT_ISSUE_MESSAGE)
+        self._set_warning_details(
+            _SELECT_ISSUE_MESSAGE if warning_items else _NO_WARNINGS_MESSAGE
+        )
         self._set_select_feature_enabled(False)
         if self.empty_warning_label is not None:
             set_text = getattr(self.empty_warning_label, "setText", None)
@@ -829,7 +881,7 @@ class _ResultsDialogController:
             set_text(text)
 
     def _reset_ai_presentation(self) -> None:
-        self._set_ai_status("No AI analysis has been requested yet.")
+        self._set_ai_status(_NO_AI_EXPLANATION_MESSAGE)
         self._set_read_only_text(self.ai_explanation_view, "")
         self._set_read_only_text(self.ai_technical_view, "")
         set_enabled = getattr(self.ai_technical_button, "setEnabled", None)
@@ -1297,7 +1349,7 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     dialog = qt_widgets.QDialog(parent)
     dialog.setWindowTitle("Model Health Assistant")
     dialog.setModal(False)
-    dialog.setMinimumSize(760, 560)
+    dialog.setMinimumSize(680, 500)
 
     layout = qt_widgets.QVBoxLayout(dialog)
     if hasattr(layout, "setSpacing"):
@@ -1317,6 +1369,7 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
 
     issues_header_layout = qt_widgets.QHBoxLayout()
     issues_heading = qt_widgets.QLabel("Issues", issues_tab)
+    _set_label_bold(issues_heading)
     issue_count_label = qt_widgets.QLabel("0 issues", issues_tab)
     issues_header_layout.addWidget(issues_heading)
     issues_header_layout.addStretch()
@@ -1332,6 +1385,8 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     _configure_warning_table(qt_widgets, warning_table)
 
     empty_warning_label = qt_widgets.QLabel(_NO_WARNINGS_MESSAGE, issues_tab)
+    if hasattr(empty_warning_label, "setWordWrap"):
+        empty_warning_label.setWordWrap(True)
     empty_warning_label.setVisible(False)
 
     details_group = qt_widgets.QGroupBox("Selected issue", issues_tab)
@@ -1391,7 +1446,7 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     ai_status_group = qt_widgets.QGroupBox("Status", ai_tab)
     ai_status_layout = qt_widgets.QVBoxLayout(ai_status_group)
     ai_status_label = qt_widgets.QLabel(
-        "No AI analysis has been requested yet.",
+        _NO_AI_EXPLANATION_MESSAGE,
         ai_status_group,
     )
     if hasattr(ai_status_label, "setWordWrap"):
@@ -1400,23 +1455,20 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     ai_layout.addWidget(ai_status_group)
 
     ai_action_layout = qt_widgets.QHBoxLayout()
-    explain_full_analysis_button = qt_widgets.QPushButton(
-        "Explain Full Analysis",
-        ai_tab,
-    )
-    explain_full_analysis_button.setEnabled(False)
     ask_about_analysis_button = qt_widgets.QPushButton(
         "Ask About This Analysis",
         ai_tab,
     )
     ask_about_analysis_button.setEnabled(False)
+    ask_about_analysis_button.setToolTip(
+        "Ask one question grounded in the current completed analysis."
+    )
     cancel_ai_request_button = qt_widgets.QPushButton("Cancel Request", ai_tab)
     cancel_ai_request_button.setEnabled(False)
     cancel_ai_request_button.setVisible(False)
     cancel_ai_request_button.setToolTip(
         "Logically cancel the active provider request without terminating its thread."
     )
-    ai_action_layout.addWidget(explain_full_analysis_button)
     ai_action_layout.addWidget(ask_about_analysis_button)
     ai_action_layout.addWidget(cancel_ai_request_button)
     ai_action_layout.addStretch()
@@ -1434,6 +1486,9 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     set_checkable = getattr(ai_technical_button, "setCheckable", None)
     if callable(set_checkable):
         set_checkable(True)
+    ai_technical_button.setToolTip(
+        "Show provider, request, schema, traceability, and coverage details."
+    )
     ai_results_layout.addWidget(ai_technical_button)
     ai_technical_view = qt_widgets.QPlainTextEdit(ai_results_container)
     ai_technical_view.setReadOnly(True)
@@ -1451,33 +1506,23 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
         (overview_tab, issues_tab, ai_tab),
     )
     layout.addWidget(tabs)
+    set_stretch_factor = getattr(layout, "setStretchFactor", None)
+    if callable(set_stretch_factor):
+        set_stretch_factor(tabs, 1)
     layout.addWidget(status_label)
 
     button_layout = qt_widgets.QHBoxLayout()
     refresh_analysis_button = qt_widgets.QPushButton("Refresh Analysis", dialog)
-    open_report_folder_button = qt_widgets.QPushButton(
-        "Open Report Folder",
-        dialog,
+    refresh_analysis_button.setToolTip(
+        "Run the local analysis again for the active FreeCAD document."
     )
-    open_report_folder_button.setEnabled(False)
-    copy_report_path_button = qt_widgets.QPushButton("Copy Report Path", dialog)
-    copy_report_path_button.setEnabled(False)
-    preview_ai_context_button = qt_widgets.QPushButton(
-        "Preview AI Context",
-        dialog,
-    )
-    preview_ai_context_button.setEnabled(False)
-    test_mock_explanation_button = qt_widgets.QPushButton(
-        "Test Mock Explanation",
-        dialog,
-    )
-    test_mock_explanation_button.setEnabled(False)
-    button_layout.addWidget(open_report_folder_button)
-    button_layout.addWidget(copy_report_path_button)
-    button_layout.addWidget(preview_ai_context_button)
-    button_layout.addWidget(test_mock_explanation_button)
     button_layout.addWidget(refresh_analysis_button)
     button_layout.addStretch()
+    explain_full_analysis_button = qt_widgets.QPushButton("Explain with AI", dialog)
+    explain_full_analysis_button.setEnabled(False)
+    button_layout.addWidget(explain_full_analysis_button)
+    more_controls = _create_more_menu(qt_widgets, dialog)
+    button_layout.addWidget(more_controls.button)
     close_button = qt_widgets.QPushButton("Close", dialog)
     close_button.setShortcut("Esc")
     close_button.clicked.connect(dialog.close)
@@ -1518,8 +1563,8 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
             dialog,
             message,
         ),
-        open_report_folder_button=open_report_folder_button,
-        copy_report_path_button=copy_report_path_button,
+        open_report_folder_button=more_controls.open_report_folder_action,
+        copy_report_path_button=more_controls.copy_report_path_action,
         open_report_folder_handler=open_report_folder_handler,
         copy_report_path_handler=copy_report_path_handler,
         report_action_error_handler=lambda message: _show_selection_error(
@@ -1529,13 +1574,13 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
         ),
         refresh_analysis_button=refresh_analysis_button,
         status_label=status_label,
-        preview_ai_context_button=preview_ai_context_button,
+        preview_ai_context_button=more_controls.preview_ai_context_action,
         preview_ai_context_handler=lambda report: _show_ai_context_preview(
             report,
             qt_widgets,
             dialog,
         ),
-        test_mock_explanation_button=test_mock_explanation_button,
+        test_mock_explanation_button=more_controls.test_mock_explanation_action,
         test_mock_explanation_handler=lambda report: _show_mock_explanation(
             report,
             qt_widgets,
@@ -1582,10 +1627,21 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     )
     _connect_warning_table_actions(warning_table, controller)
     select_feature_button.clicked.connect(controller.select_selected_feature)
-    open_report_folder_button.clicked.connect(controller.open_report_folder)
-    copy_report_path_button.clicked.connect(controller.copy_report_path)
-    preview_ai_context_button.clicked.connect(controller.preview_ai_context)
-    test_mock_explanation_button.clicked.connect(controller.test_mock_explanation)
+    more_controls.open_report_folder_action.triggered.connect(
+        controller.open_report_folder
+    )
+    more_controls.copy_report_path_action.triggered.connect(
+        controller.copy_report_path
+    )
+    more_controls.preview_ai_context_action.triggered.connect(
+        controller.preview_ai_context
+    )
+    more_controls.about_analysis_action.triggered.connect(
+        lambda *_args: _show_about_analysis(qt_widgets, dialog)
+    )
+    more_controls.test_mock_explanation_action.triggered.connect(
+        controller.test_mock_explanation
+    )
     explain_selected_warning_button.clicked.connect(
         controller.explain_selected_warning
     )
@@ -1605,6 +1661,54 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
             )
         )
     return controller
+
+
+def _create_more_menu(qt_widgets: Any, parent: Any) -> _MoreMenuControls:
+    """Create the compact menu without removing any existing result action."""
+
+    button = qt_widgets.QPushButton("More ▾", parent)
+    button.setToolTip("Open report, privacy, information, and developer actions.")
+    menu = qt_widgets.QMenu(button)
+
+    report_menu = menu.addMenu("Report")
+    open_report_folder_action = report_menu.addAction("Open Report Folder")
+    copy_report_path_action = report_menu.addAction("Copy Report Path")
+    open_report_folder_action.setEnabled(False)
+    copy_report_path_action.setEnabled(False)
+
+    ai_menu = menu.addMenu("AI / Technical")
+    preview_ai_context_action = ai_menu.addAction("Preview AI Context")
+    preview_ai_context_action.setEnabled(False)
+
+    menu.addSeparator()
+    about_analysis_action = menu.addAction("About This Analysis")
+
+    developer_menu = menu.addMenu("Developer")
+    test_mock_explanation_action = developer_menu.addAction(
+        "Test Mock Explanation"
+    )
+    test_mock_explanation_action.setEnabled(False)
+
+    button.setMenu(menu)
+    return _MoreMenuControls(
+        button=button,
+        open_report_folder_action=open_report_folder_action,
+        copy_report_path_action=copy_report_path_action,
+        preview_ai_context_action=preview_ai_context_action,
+        about_analysis_action=about_analysis_action,
+        test_mock_explanation_action=test_mock_explanation_action,
+    )
+
+
+def _show_about_analysis(qt_widgets: Any, parent: Any) -> bool:
+    """Show the existing methodology and advisory information."""
+
+    message_box = getattr(qt_widgets, "QMessageBox", None)
+    information = getattr(message_box, "information", None)
+    if not callable(information):
+        return False
+    information(parent, "About This Analysis", _ABOUT_ANALYSIS_TEXT)
+    return True
 
 
 def _create_results_tabs(
@@ -1749,6 +1853,82 @@ def _set_center_alignment(label: Any, qt_core: Any | None) -> None:
         set_alignment(alignment)
 
 
+def _format_ai_request_review_summary(review: Any) -> str:
+    """Describe the exact review using only facts contained in its payload."""
+
+    payload = review.preview_payload()
+    context = payload["privacy_safe_context"]
+    metadata = context["metadata"]
+    provider = payload["provider"]
+
+    included_warning_count = int(payload["included_warning_count"])
+    omitted_warning_count = int(payload["omitted_warning_count"])
+    original_warning_count = included_warning_count + omitted_warning_count
+    category_counts = context.get("category_counts", {})
+    category_text = ", ".join(
+        f"{name}: {count}" for name, count in sorted(category_counts.items())
+    ) or "none reported"
+
+    sent_items = [
+        f"Health score: {context['health_score']}/100",
+        (
+            "Aggregate model counts: "
+            f"{context['total_document_object_count']} objects, "
+            f"{context['meaningful_modeling_feature_count']} modeling features, "
+            f"{context['total_sketch_count']} sketches"
+        ),
+        (
+            "Model-health warnings: "
+            f"{included_warning_count} of {original_warning_count} included"
+        ),
+        f"Feature-category counts: {category_text}",
+    ]
+    if context.get("analysis_limitations"):
+        sent_items.append("Analysis limitations recorded in the local report")
+    if bool(payload["document_name_included"]):
+        sent_items.append(
+            "Document display name: "
+            + str(context.get("document_display_name", "included"))
+        )
+    if bool(payload["user_question_included"]):
+        sent_items.append("Your question shown in the exact request")
+    sent_items.append("Provider instructions and request metadata shown in the JSON")
+
+    not_sent_items = [str(item) for item in payload["privacy_notices"][:2]]
+    if not bool(payload["document_name_included"]):
+        not_sent_items.append("The original document name is excluded.")
+
+    lines = [
+        "AI Analysis Request",
+        "",
+        "Nothing has been sent yet.",
+        "",
+        "Information that will be sent:",
+        *(f"✓ {item}" for item in sent_items),
+        "",
+        "Information that will NOT be sent:",
+        *(f"✓ {item}" for item in not_sent_items),
+        "",
+        "Provider:",
+        str(provider["display_name"]),
+        "",
+        "Model:",
+        str(payload["model_identifier"]),
+    ]
+    if bool(payload["truncated"]):
+        lines.extend(
+            (
+                "",
+                (
+                    "Context limits applied: "
+                    f"{omitted_warning_count} warning(s) omitted and "
+                    f"{metadata['truncated_field_count']} field(s) shortened."
+                ),
+            )
+        )
+    return "\n".join(lines)
+
+
 def _build_ai_context_preview_json(report: ModelHealthReport) -> str:
     """Return the complete standalone privacy review for the retained report."""
 
@@ -1792,10 +1972,7 @@ def _show_ai_context_preview(
         )
     _ai_context_preview_dialog.update_review(
         review,
-        lambda _consent: (
-            "Standalone preview only: choose a specific explanation action before "
-            "a provider request can be sent."
-        ),
+        None,
     )
     _ai_context_preview_dialog.show()
     return None
@@ -1808,7 +1985,7 @@ def _create_ai_context_preview_dialog(
     dialog = qt_widgets.QDialog(parent)
     dialog.setWindowTitle("Preview AI Context — Local Only")
     dialog.setModal(False)
-    dialog.setMinimumSize(720, 520)
+    dialog.setMinimumSize(640, 440)
 
     layout = qt_widgets.QVBoxLayout(dialog)
     notice_label = qt_widgets.QLabel(AI_CONTEXT_PREVIEW_NOTICE, dialog)
@@ -1816,8 +1993,28 @@ def _create_ai_context_preview_dialog(
         notice_label.setWordWrap(True)
     layout.addWidget(notice_label)
 
+    summary_label = qt_widgets.QLabel("", dialog)
+    if hasattr(summary_label, "setWordWrap"):
+        summary_label.setWordWrap(True)
+    layout.addWidget(summary_label)
+
+    exact_request_button = qt_widgets.QPushButton(
+        "View Exact Request JSON",
+        dialog,
+    )
+    set_checkable = getattr(exact_request_button, "setCheckable", None)
+    if callable(set_checkable):
+        set_checkable(True)
+    set_tool_tip = getattr(exact_request_button, "setToolTip", None)
+    if callable(set_tool_tip):
+        set_tool_tip("Show the complete selectable JSON that would be sent.")
+    layout.addWidget(exact_request_button)
+
     context_view = qt_widgets.QPlainTextEdit(dialog)
     context_view.setReadOnly(True)
+    set_visible = getattr(context_view, "setVisible", None)
+    if callable(set_visible):
+        set_visible(False)
     layout.addWidget(context_view)
 
     status_label = qt_widgets.QLabel("", dialog)
@@ -1840,7 +2037,10 @@ def _create_ai_context_preview_dialog(
         context_view,
         status_label,
         send_button,
+        summary_label,
+        exact_request_button,
     )
+    exact_request_button.clicked.connect(controller.toggle_exact_request)
     cancel_button.clicked.connect(controller.cancel)
     send_button.clicked.connect(controller.send_to_provider)
     destroyed_signal = getattr(dialog, "destroyed", None)
@@ -2502,7 +2702,7 @@ def _create_ai_explanation_dialog(
     dialog = qt_widgets.QDialog(parent)
     dialog.setWindowTitle("AI Explanation")
     dialog.setModal(False)
-    dialog.setMinimumSize(760, 560)
+    dialog.setMinimumSize(640, 440)
 
     layout = qt_widgets.QVBoxLayout(dialog)
     notice_label = qt_widgets.QLabel(
@@ -2674,7 +2874,7 @@ def _create_mock_explanation_dialog(
     dialog = qt_widgets.QDialog(parent)
     dialog.setWindowTitle("Mock Explanation - Local Test Provider")
     dialog.setModal(False)
-    dialog.setMinimumSize(720, 520)
+    dialog.setMinimumSize(640, 440)
 
     layout = qt_widgets.QVBoxLayout(dialog)
     notice_label = qt_widgets.QLabel(MOCK_EXPLANATION_NOTICE, dialog)
@@ -2731,6 +2931,13 @@ def _configure_warning_table(qt_widgets: Any, warning_table: Any) -> None:
     warning_table.setColumnCount(len(_WARNING_TABLE_HEADERS))
     warning_table.setHorizontalHeaderLabels(list(_WARNING_TABLE_HEADERS))
     warning_table.setSortingEnabled(False)
+    set_alternating_rows = getattr(
+        warning_table,
+        "setAlternatingRowColors",
+        None,
+    )
+    if callable(set_alternating_rows):
+        set_alternating_rows(True)
     for column_index, width in enumerate(_WARNING_COLUMN_WIDTHS):
         set_column_width = getattr(warning_table, "setColumnWidth", None)
         if callable(set_column_width):
