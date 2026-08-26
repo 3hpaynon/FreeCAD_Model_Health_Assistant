@@ -59,6 +59,25 @@ def ensure_src_on_path(
 
 SRC_DIR = ensure_src_on_path()
 
+
+def initialize_recovery_tracking(_app_module=None):
+    """Register selective-recovery observation once per FreeCAD process."""
+
+    active_app = App if _app_module is None else _app_module
+    if active_app is None or not hasattr(active_app, "addDocumentObserver"):
+        return None
+    try:
+        from model_health_assistant.recovery_observer import (
+            ensure_recovery_observer_registered,
+        )
+
+        return ensure_recovery_observer_registered(active_app)
+    except Exception:
+        # Recovery must fail closed without preventing the workbench or the
+        # user's document from loading.  The observer exposes diagnostics for
+        # later UI work; startup remains deliberately quiet here.
+        return None
+
 try:  # pragma: no cover - exercised inside FreeCAD.
     import FreeCADGui as Gui  # type: ignore
 except Exception:  # pragma: no cover - expected outside FreeCAD.
@@ -219,6 +238,9 @@ class ModelHealthAssistantWorkbench(BaseWorkbench):
         """Return the FreeCAD workbench base class name."""
 
         return "Gui::PythonWorkbench"
+
+
+RECOVERY_OBSERVER = initialize_recovery_tracking()
 
 
 if Gui is not None:  # pragma: no cover - exercised inside FreeCAD.

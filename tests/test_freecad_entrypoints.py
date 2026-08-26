@@ -153,6 +153,39 @@ def test_init_gui_registers_workbench_when_freecad_gui_is_available(monkeypatch)
     assert isinstance(fake_gui.workbenches[0], module.ModelHealthAssistantWorkbench)
 
 
+def test_init_gui_registers_recovery_observer_when_api_is_available(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from model_health_assistant.recovery_observer import (
+        shutdown_recovery_observer,
+    )
+
+    shutdown_recovery_observer()
+    fake_app = types.ModuleType("FreeCAD")
+    fake_app.observers = []
+    fake_app.getUserAppDataDir = lambda: str(tmp_path)
+    fake_app.listDocuments = lambda: {}
+    fake_app.addDocumentObserver = lambda observer: fake_app.observers.append(observer)
+    fake_app.removeDocumentObserver = lambda observer: fake_app.observers.remove(observer)
+    fake_gui = types.ModuleType("FreeCADGui")
+    fake_gui.addWorkbench = lambda workbench: None
+    monkeypatch.setitem(sys.modules, "FreeCAD", fake_app)
+    monkeypatch.setitem(sys.modules, "FreeCADGui", fake_gui)
+    try:
+        module = _load_module(
+            "mha_test_init_gui_recovery_observer",
+            REPO_ROOT / "InitGui.py",
+        )
+
+        assert module.RECOVERY_OBSERVER is not None
+        assert fake_app.observers == [module.RECOVERY_OBSERVER]
+        assert module.initialize_recovery_tracking(fake_app) is module.RECOVERY_OBSERVER
+        assert len(fake_app.observers) == 1
+    finally:
+        shutdown_recovery_observer()
+
+
 def test_init_gui_initialize_adds_test_command_to_toolbar_and_menu(monkeypatch) -> None:
     fake_gui = types.ModuleType("FreeCADGui")
     fake_gui.commands = {}
