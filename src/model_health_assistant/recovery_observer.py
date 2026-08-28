@@ -1,9 +1,4 @@
-"""FreeCAD document observation and debounced last-known sketch snapshots.
-
-The observer deliberately stops at a pending-deletion boundary.  Converting a
-pending deletion into the final deleted-object vault lifecycle belongs to the
-next recovery step.
-"""
+"""FreeCAD observation, debounced snapshots, and durable deletion transitions."""
 
 from __future__ import annotations
 
@@ -11,11 +6,13 @@ import atexit
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
+from .recovery_lifecycle import RecoveryLifecycleService
 from .recovery_vault import (
     RecoveryDocumentLocator,
     RecoveryIndexEntry,
@@ -112,6 +109,7 @@ class SketchRecoveryObserver:
         debounce_milliseconds: int = DEFAULT_DEBOUNCE_MILLISECONDS,
         session_id: str | None = None,
         timestamp_factory: TimestampFactory = utc_timestamp,
+        lifecycle_service: RecoveryLifecycleService | None = None,
     ) -> None:
         if debounce_milliseconds < 0:
             raise ValueError("debounce_milliseconds must not be negative")
@@ -122,12 +120,17 @@ class SketchRecoveryObserver:
         self._debounce_milliseconds = debounce_milliseconds
         self._session_id = session_id or str(uuid4())
         self._timestamp_factory = timestamp_factory
+        self._lifecycle_service = lifecycle_service or RecoveryLifecycleService(
+            vault
+        )
         self._document_instance_ids: dict[int, str] = {}
         self._document_ids: dict[int, str] = {}
         self._document_objects: dict[int, Any] = {}
         self._states_by_runtime: dict[int, TrackedSketchState] = {}
         self._state_keys_by_document: dict[int, set[int]] = {}
         self._pending_deletions: dict[tuple[str, str], PendingSketchDeletion] = {}
+        self._deletion_persistence_errors: dict[tuple[str, str], str] = {}
+        self._tracking_suspension_depth = 0
         self._shutdown = False
         self._registered = False
 
@@ -138,6 +141,32 @@ class SketchRecoveryObserver:
     @property
     def tracked_sketch_count(self) -> int:
         return len(self._states_by_runtime)
+
+    def document_id_for(self, document: Any) -> str | None:
+        """Return the durable identity already assigned to one live document."""
+
+        return self._document_ids.get(id(document))
+
+    @contextmanager
+    def suspend_object_tracking(self):
+        """Ignore transient object callbacks during one controlled transaction."""
+
+        self._tracking_suspension_depth += 1
+        try:
+            yield
+        finally:
+            self._tracking_suspension_depth = max(
+                0,
+                self._tracking_suspension_depth - 1,
+            )
+
+    def capture_restored_sketch(self, sketch: Any) -> bool:
+        """Capture one fully reconstructed sketch after callback suspension ends."""
+
+        if self._shutdown or self._tracking_suspension_depth:
+            return False
+        state = self._track_object(sketch, capture_immediately=True)
+        return bool(state is not None and state.latest_snapshot is not None)
 
     def start(self) -> None:
         """Scan documents already open when the observer is registered."""
@@ -152,6 +181,7 @@ class SketchRecoveryObserver:
 
         if self._shutdown:
             return
+        self.persist_pending_deletions()
         self._shutdown = True
         self._cancel_scheduler()
         self._states_by_runtime.clear()
@@ -160,9 +190,10 @@ class SketchRecoveryObserver:
         self._document_ids.clear()
         self._document_instance_ids.clear()
         self._pending_deletions.clear()
+        self._deletion_persistence_errors.clear()
 
     def pending_deletions(self) -> tuple[PendingSketchDeletion, ...]:
-        """Return defensive copies for the future vault-lifecycle service."""
+        """Return defensive copies of deletion events retained this session."""
 
         return tuple(
             PendingSketchDeletion(
@@ -177,6 +208,26 @@ class SketchRecoveryObserver:
             )
             for item in self._pending_deletions.values()
         )
+
+    def deletion_persistence_errors(self) -> dict[tuple[str, str], str]:
+        """Return non-sensitive error types for deletion transitions awaiting retry."""
+
+        return dict(self._deletion_persistence_errors)
+
+    def persist_pending_deletions(self) -> int:
+        """Idempotently persist all cached deletion events into the vault index."""
+
+        created = 0
+        for key, pending in tuple(self._pending_deletions.items()):
+            try:
+                result = self._lifecycle_service.record_deletion(pending)
+            except Exception as exc:  # noqa: BLE001 - FreeCAD callbacks must survive.
+                self._deletion_persistence_errors[key] = type(exc).__name__
+                continue
+            self._deletion_persistence_errors.pop(key, None)
+            if result.created:
+                created += 1
+        return created
 
     def flush_pending(self) -> int:
         """Capture every dirty live sketch and return the number persisted."""
@@ -211,11 +262,15 @@ class SketchRecoveryObserver:
             self._safe_refresh_document_identity(document)
 
     def slotCreatedObject(self, obj: Any) -> None:  # noqa: N802
+        if self._tracking_suspension_depth:
+            return
         self._safe_track_object(obj, capture_immediately=True)
 
     def slotBeforeChangeObject(self, obj: Any, _property: str) -> None:  # noqa: N802
         """Guarantee at least one baseline before the first observed mutation."""
 
+        if self._tracking_suspension_depth:
+            return
         try:
             state = self._state_for_object(obj, create=True)
             if state is not None and state.latest_snapshot is None:
@@ -224,17 +279,25 @@ class SketchRecoveryObserver:
             return
 
     def slotChangedObject(self, obj: Any, _property: str) -> None:  # noqa: N802
+        if self._tracking_suspension_depth:
+            return
         self._safe_mark_dirty(obj)
 
     def slotRecomputedObject(self, obj: Any) -> None:  # noqa: N802
+        if self._tracking_suspension_depth:
+            return
         self._safe_flush_object(obj)
 
     def slotRecomputedDocument(self, document: Any) -> None:  # noqa: N802
+        if self._tracking_suspension_depth:
+            return
         self._safe_flush_document(document)
 
     def slotDeletedObject(self, obj: Any) -> None:  # noqa: N802
         """Retain cached state without reading destroyed sketch geometry."""
 
+        if self._tracking_suspension_depth:
+            return
         try:
             runtime_key = id(obj)
             state = self._states_by_runtime.get(runtime_key)
@@ -254,6 +317,7 @@ class SketchRecoveryObserver:
                     snapshot=deepcopy(state.latest_snapshot),
                 )
                 self._pending_deletions[(state.document_id, state.object_id)] = pending
+                self.persist_pending_deletions()
             self._remove_live_state(runtime_key, state)
             if not self._has_dirty_states():
                 self._cancel_scheduler()
@@ -333,6 +397,7 @@ class SketchRecoveryObserver:
                 self._track_object(obj, capture_immediately=True)
 
     def _forget_document(self, document: Any) -> None:
+        self.persist_pending_deletions()
         document_key = id(document)
         for runtime_key in list(
             self._state_keys_by_document.pop(document_key, set())
@@ -346,6 +411,11 @@ class SketchRecoveryObserver:
                 key: item
                 for key, item in self._pending_deletions.items()
                 if item.document_id != document_id
+            }
+            self._deletion_persistence_errors = {
+                key: value
+                for key, value in self._deletion_persistence_errors.items()
+                if key[0] != document_id
             }
         if not self._has_dirty_states():
             self._cancel_scheduler()
@@ -583,6 +653,17 @@ def shutdown_recovery_observer() -> bool:
     return True
 
 
+def registered_recovery_observer(app_module: Any) -> SketchRecoveryObserver | None:
+    """Return the active process-wide observer without registering a new one."""
+
+    observer = getattr(app_module, _APP_OBSERVER_ATTRIBUTE, None)
+    if observer is None and _REGISTERED_APP is app_module:
+        observer = _REGISTERED_OBSERVER
+    if observer is None or not bool(getattr(observer, "is_registered", False)):
+        return None
+    return observer
+
+
 def _open_documents(app_module: Any) -> list[Any]:
     list_documents = getattr(app_module, "listDocuments", None)
     if callable(list_documents):
@@ -681,5 +762,6 @@ __all__ = [
     "SketchRecoveryObserver",
     "TrackedSketchState",
     "ensure_recovery_observer_registered",
+    "registered_recovery_observer",
     "shutdown_recovery_observer",
 ]

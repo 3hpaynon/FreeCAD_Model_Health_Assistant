@@ -244,7 +244,32 @@ def test_results_controller_updates_issue_count_label() -> None:
     assert issue_counts == ["1 issue", "4 issues"]
 
 
-def test_results_tabs_use_overview_issues_ai_order() -> None:
+def test_results_controller_refreshes_recovery_for_analyzed_document() -> None:
+    contexts = []
+    recovery_controller = SimpleNamespace(
+        refresh=lambda context: contexts.append(context),
+    )
+    controller = ui._ResultsDialogController(
+        SimpleNamespace(),
+        {},
+        recovery_controller=recovery_controller,
+        recovery_tab_index=3,
+    )
+    context = ui._AnalyzedDocumentContext(
+        document=object(),
+        document_name="Demo",
+        app_module=SimpleNamespace(),
+        gui_module=SimpleNamespace(),
+    )
+
+    controller.update_presentation(_presentation(), document_context=context)
+    controller.recovery_tab_changed(2)
+    controller.recovery_tab_changed(3)
+
+    assert contexts == [context, context]
+
+
+def test_results_tabs_append_recovery_without_reordering_existing_tabs() -> None:
     class FakeTabs:
         def __init__(self, parent) -> None:
             self.parent = parent
@@ -254,7 +279,7 @@ def test_results_tabs_use_overview_issues_ai_order() -> None:
             self.pages.append((page, title))
 
     parent = object()
-    pages = (object(), object(), object())
+    pages = (object(), object(), object(), object())
 
     tabs = ui._create_results_tabs(
         SimpleNamespace(QTabWidget=FakeTabs),
@@ -263,7 +288,9 @@ def test_results_tabs_use_overview_issues_ai_order() -> None:
     )
 
     assert tabs.parent is parent
-    assert tabs.pages == list(zip(pages, ("Overview", "Issues", "AI")))
+    assert tabs.pages == list(
+        zip(pages, ("Overview", "Issues", "AI", "Recovery"))
+    )
 
 
 def test_more_menu_keeps_report_privacy_about_and_developer_actions() -> None:

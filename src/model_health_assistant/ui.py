@@ -40,7 +40,7 @@ COMMAND_NAME = "MHA_AnalyzeFeatureTree"
 
 _WARNING_TABLE_HEADERS = ("Severity", "Feature", "Rule", "Warning")
 _WARNING_COLUMN_WIDTHS = (85, 170, 190)
-_RESULT_TAB_TITLES = ("Overview", "Issues", "AI")
+_RESULT_TAB_TITLES = ("Overview", "Issues", "AI", "Recovery")
 _NO_WARNINGS_MESSAGE = "No issues detected."
 _SELECT_ISSUE_MESSAGE = "Select an issue to view details."
 _NO_AI_EXPLANATION_MESSAGE = "No AI explanation has been requested."
@@ -266,6 +266,8 @@ class _ResultsDialogController:
         ai_technical_button: Any | None = None,
         ai_technical_view: Any | None = None,
         results_tabs: Any | None = None,
+        recovery_controller: Any | None = None,
+        recovery_tab_index: int | None = None,
     ) -> None:
         self.dialog = dialog
         self.value_labels = value_labels
@@ -302,6 +304,8 @@ class _ResultsDialogController:
         self.ai_technical_button = ai_technical_button
         self.ai_technical_view = ai_technical_view
         self.results_tabs = results_tabs
+        self.recovery_controller = recovery_controller
+        self.recovery_tab_index = recovery_tab_index
         self._ai_request_state = AIRequestStateController()
         self._active_ai_ticket: int | None = None
         self._ai_operation_running = False
@@ -336,6 +340,8 @@ class _ResultsDialogController:
         self._refresh_ai_action_state()
         self._set_issue_count(presentation.total_warning_count)
         self._reset_ai_presentation()
+        if self.recovery_controller is not None:
+            self.recovery_controller.refresh(document_context)
         self.update_status(status_message)
         self._update_warning_table(presentation)
 
@@ -350,6 +356,16 @@ class _ResultsDialogController:
         set_visible = getattr(self.status_label, "setVisible", None)
         if callable(set_visible):
             set_visible(bool(message))
+
+    def recovery_tab_changed(self, index: object, *_args: Any) -> None:
+        """Refresh durable deleted objects whenever the Recovery tab opens."""
+
+        if (
+            self.recovery_controller is not None
+            and type(index) is int
+            and index == self.recovery_tab_index
+        ):
+            self.recovery_controller.refresh(self.document_context)
 
     def _update_warning_table(self, presentation: AnalysisPresentation) -> None:
         self.warning_items = tuple(presentation.warning_items)
@@ -1500,10 +1516,29 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     if callable(set_stretch_factor):
         set_stretch_factor(ai_results_container, 1)
 
+    from model_health_assistant.recovery_ui import create_recovery_tab
+
+    recovery_tab, recovery_controller = create_recovery_tab(
+        qt_widgets,
+        dialog,
+        records_loader=_load_deleted_object_presentations,
+        details_handler=lambda item: _show_deleted_object_details(
+            qt_widgets,
+            dialog,
+            item,
+        ),
+        restore_handler=lambda item, context: _start_recovery_restore(
+            qt_widgets,
+            dialog,
+            item,
+            context,
+        ),
+    )
+
     tabs = _create_results_tabs(
         qt_widgets,
         dialog,
-        (overview_tab, issues_tab, ai_tab),
+        (overview_tab, issues_tab, ai_tab, recovery_tab),
     )
     layout.addWidget(tabs)
     set_stretch_factor = getattr(layout, "setStretchFactor", None)
@@ -1624,6 +1659,8 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
         ai_technical_button=ai_technical_button,
         ai_technical_view=ai_technical_view,
         results_tabs=tabs,
+        recovery_controller=recovery_controller,
+        recovery_tab_index=3,
     )
     _connect_warning_table_actions(warning_table, controller)
     select_feature_button.clicked.connect(controller.select_selected_feature)
@@ -1650,6 +1687,12 @@ def _create_results_dialog(qt_widgets: Any, parent: Any) -> _ResultsDialogContro
     cancel_ai_request_button.clicked.connect(controller.cancel_ai_operation)
     ai_technical_button.clicked.connect(controller.toggle_ai_technical_details)
     refresh_analysis_button.clicked.connect(controller.refresh_analysis)
+    current_changed_signal = getattr(tabs, "currentChanged", None)
+    if current_changed_signal is not None and hasattr(
+        current_changed_signal,
+        "connect",
+    ):
+        current_changed_signal.connect(controller.recovery_tab_changed)
     finished_signal = getattr(dialog, "finished", None)
     if finished_signal is not None and hasattr(finished_signal, "connect"):
         finished_signal.connect(controller.detach_ai_operation)
@@ -1714,7 +1757,7 @@ def _show_about_analysis(qt_widgets: Any, parent: Any) -> bool:
 def _create_results_tabs(
     qt_widgets: Any,
     parent: Any,
-    pages: tuple[Any, Any, Any],
+    pages: tuple[Any, ...],
 ) -> Any:
     """Create the stable top-level results navigation in display order."""
 
@@ -1722,6 +1765,195 @@ def _create_results_tabs(
     for page, title in zip(pages, _RESULT_TAB_TITLES):
         tabs.addTab(page, title)
     return tabs
+
+
+def _load_deleted_object_presentations(
+    document_context: _AnalyzedDocumentContext | None,
+) -> tuple[Any, ...]:
+    """Read current-document deleted sketches through recovery services."""
+
+    if document_context is None:
+        raise RuntimeError("No analyzed document is available for recovery.")
+
+    from model_health_assistant.recovery_lifecycle import RecoveryLifecycleService
+    from model_health_assistant.recovery_observer import (
+        registered_recovery_observer,
+    )
+    from model_health_assistant.recovery_presentation import (
+        build_deleted_object_presentations,
+    )
+
+    observer = registered_recovery_observer(document_context.app_module)
+    if observer is None:
+        raise RuntimeError("The recovery observer is unavailable.")
+    document_id = observer.document_id_for(document_context.document)
+    if document_id is None:
+        raise RuntimeError("The analyzed document is not tracked for recovery.")
+    records = RecoveryLifecycleService(observer.vault).list_deleted_records(
+        document_id
+    )
+    return build_deleted_object_presentations(records)
+
+
+def _show_deleted_object_details(
+    qt_widgets: Any,
+    parent: Any,
+    item: Any,
+) -> bool:
+    """Show structured recovery details without exposing raw snapshot JSON."""
+
+    message_box = getattr(qt_widgets, "QMessageBox", None)
+    information = getattr(message_box, "information", None)
+    if not callable(information):
+        return False
+    information(
+        parent,
+        f"Deleted Sketch — {item.object_name}",
+        item.details_text,
+    )
+    return True
+
+
+def _start_recovery_restore(
+    qt_widgets: Any,
+    parent: Any,
+    item: Any,
+    document_context: _AnalyzedDocumentContext | None,
+) -> bool:
+    """Assess, confirm, and execute through the recovery restore service."""
+
+    message_box = getattr(qt_widgets, "QMessageBox", None)
+    show_warning = getattr(message_box, "warning", None)
+    show_information = getattr(message_box, "information", None)
+    if document_context is None:
+        if callable(show_warning):
+            show_warning(parent, "Restore as Copy", "No analyzed document is available.")
+        return False
+
+    try:
+        from model_health_assistant.recovery_observer import (
+            registered_recovery_observer,
+        )
+        from model_health_assistant.recovery_restore import RecoveryRestoreService
+
+        observer = registered_recovery_observer(document_context.app_module)
+        if observer is None:
+            raise RuntimeError("The recovery observer is unavailable.")
+        document_id = observer.document_id_for(document_context.document)
+        if document_id != item.document_id:
+            raise RuntimeError("The selected recovery record belongs to another document.")
+        service = RecoveryRestoreService(
+            observer.vault,
+            app_module=document_context.app_module,
+            observer=observer,
+        )
+        assessment = service.assess(
+            document_context.document,
+            document_id,
+            item.object_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - keep technical detail out of dialog.
+        if callable(show_warning):
+            show_warning(
+                parent,
+                "Restore as Copy",
+                "The deleted sketch could not be safely assessed for restoration.",
+            )
+        _print_error(
+            _failure_message("Recovery assessment failed", exc),
+            document_context.app_module,
+        )
+        return False
+
+    if not assessment.can_restore:
+        if callable(show_warning):
+            show_warning(
+                parent,
+                "Restore as Copy",
+                "This deleted sketch is not safely recoverable.",
+            )
+        return False
+    mode = _show_restore_confirmation(qt_widgets, parent, assessment)
+    if mode is None:
+        return False
+
+    result = service.restore(
+        document_context.document,
+        document_id,
+        item.object_id,
+        mode=mode,
+    )
+    if result.success:
+        message = result.message
+        if result.warnings:
+            message += "\n\nWarnings:\n" + "\n".join(
+                f"• {warning}" for warning in result.warnings
+            )
+        if callable(show_information):
+            show_information(parent, "Restore as Copy", message)
+        return True
+
+    if callable(show_warning):
+        show_warning(parent, "Restore as Copy", result.message)
+    technical = (
+        f"Recovery restore failed at {result.error_stage or 'unknown stage'}: "
+        f"{result.error_type or 'unknown error'}: {result.error_detail or ''}\n"
+    )
+    _print_error(technical, document_context.app_module)
+    return False
+
+
+def _show_restore_confirmation(
+    qt_widgets: Any,
+    parent: Any,
+    assessment: Any,
+) -> str | None:
+    """Return the explicit safe restore choice, or None when cancelled."""
+
+    from model_health_assistant.support_validation import (
+        RESTORE_DETACHED,
+        RESTORE_WITH_ORIGINAL_SUPPORT,
+    )
+
+    dialog = qt_widgets.QDialog(parent)
+    dialog.setWindowTitle(f"Restore {assessment.object_name}")
+    dialog.setModal(True)
+    layout = qt_widgets.QVBoxLayout(dialog)
+    summary = qt_widgets.QLabel(assessment.confirmation_text, dialog)
+    set_word_wrap = getattr(summary, "setWordWrap", None)
+    if callable(set_word_wrap):
+        set_word_wrap(True)
+    layout.addWidget(summary)
+
+    button_layout = qt_widgets.QHBoxLayout()
+    button_layout.addStretch()
+    cancel_button = qt_widgets.QPushButton("Cancel", dialog)
+    cancel_button.setShortcut("Esc")
+    button_layout.addWidget(cancel_button)
+    if RESTORE_WITH_ORIGINAL_SUPPORT in assessment.allowed_modes:
+        attached_button = qt_widgets.QPushButton(
+            "Restore with Original Support",
+            dialog,
+        )
+        button_layout.addWidget(attached_button)
+        attached_button.clicked.connect(
+            lambda *_args: dialog.done(2)
+        )
+    detached_button = qt_widgets.QPushButton("Restore Detached", dialog)
+    button_layout.addWidget(detached_button)
+    layout.addLayout(button_layout)
+    cancel_button.clicked.connect(dialog.reject)
+    detached_button.clicked.connect(lambda *_args: dialog.done(1))
+
+    execute = getattr(dialog, "exec", None) or getattr(dialog, "exec_", None)
+    if not callable(execute):
+        return None
+    result = execute()
+    if result == 2:
+        return RESTORE_WITH_ORIGINAL_SUPPORT
+    if result == 1:
+        return RESTORE_DETACHED
+    return None
 
 
 def _create_overview_tab(

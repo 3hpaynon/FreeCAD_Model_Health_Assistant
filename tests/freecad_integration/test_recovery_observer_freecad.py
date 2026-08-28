@@ -39,6 +39,9 @@ def test_native_observer_retains_last_recomputed_state_on_deletion() -> None:
         assert pending[0].snapshot["object"]["label"] == "Last native state – 草图"
         index = observer.vault.load_index(pending[0].document_id)
         assert index["entries"][0]["latest_snapshot_id"] == pending[0].snapshot_id
+        assert index["entries"][0]["status"] == "deleted"
+        assert index["entries"][0]["recovery_eligibility"] == "available"
+        assert observer.deletion_persistence_errors() == {}
     finally:
         App.removeDocumentObserver(observer)
         observer.shutdown()

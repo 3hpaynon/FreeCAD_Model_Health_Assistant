@@ -24,6 +24,9 @@ _UNUSED_GEOMETRY = -2000
 _SAFE_EXPRESSION_PATH = re.compile(
     r"^Constraints(?:\[(?:0|[1-9][0-9]*)\]|\.[A-Za-z_][A-Za-z0-9_]*)$"
 )
+_INDEXED_CONSTRAINT_EXPRESSION = re.compile(
+    r"^Constraints\[(?P<index>0|[1-9][0-9]*)\]$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +88,7 @@ def restore_sketch_as_copy(
     restore_attachment: bool = False,
     restore_external_geometry: bool = False,
     reference_validator: ReferenceValidator | None = None,
+    detach_unsafe_references: bool = False,
 ) -> SketchRestoreResult:
     """Restore one eligible snapshot as a new sketch in ``document``.
 
@@ -93,8 +97,17 @@ def restore_sketch_as_copy(
     that the topological element still represents the original geometry.
     """
 
+    preflight_warnings: tuple[str, ...] = ()
     try:
         object_record = _validated_snapshot_object(snapshot)
+        if detach_unsafe_references:
+            if restore_attachment or restore_external_geometry:
+                raise SketchReconstructionError(
+                    "detached restoration cannot restore recorded references"
+                )
+            object_record, preflight_warnings = _detached_object_record(
+                object_record
+            )
         app = app_module or importlib.import_module("FreeCAD")
         part = part_module or importlib.import_module("Part")
         sketcher = sketcher_module or importlib.import_module("Sketcher")
@@ -130,7 +143,7 @@ def restore_sketch_as_copy(
             error_stage="preflight",
         )
 
-    warnings: list[str] = []
+    warnings: list[str] = list(preflight_warnings)
     restored_object = None
     restored_object_name_for_rollback: str | None = None
     transaction_open = False
@@ -339,6 +352,79 @@ def _validated_snapshot_object(snapshot: Mapping[str, Any]) -> dict[str, Any]:
             raise SketchReconstructionError(f"snapshot {key} must be a list")
         normalized[key] = value
     return normalized
+
+
+def _detached_object_record(
+    object_record: Mapping[str, Any],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Remove only constraints that depend on unsafe external geometry."""
+
+    original_constraints = object_record["constraints"]
+    kept_constraints: list[dict[str, Any]] = []
+    index_mapping: dict[int, int] = {}
+    kept_names: set[str] = set()
+    for old_index, constraint in enumerate(original_constraints):
+        if not isinstance(constraint, Mapping):
+            kept_constraints.append(constraint)
+            continue
+        if _constraint_uses_external_geometry(constraint):
+            continue
+        new_index = len(kept_constraints)
+        normalized = dict(constraint)
+        normalized["index"] = new_index
+        kept_constraints.append(normalized)
+        index_mapping[old_index] = new_index
+        name = constraint.get("name")
+        if isinstance(name, str) and name:
+            kept_names.add(name)
+
+    expressions: list[dict[str, str]] = []
+    omitted_expressions = 0
+    for expression in object_record.get("expressions", []):
+        if not isinstance(expression, Mapping):
+            omitted_expressions += 1
+            continue
+        property_path = expression.get("property")
+        expression_text = expression.get("expression")
+        if not isinstance(property_path, str) or not isinstance(expression_text, str):
+            omitted_expressions += 1
+            continue
+        indexed_match = _INDEXED_CONSTRAINT_EXPRESSION.fullmatch(property_path)
+        if indexed_match is not None:
+            old_index = int(indexed_match.group("index"))
+            if old_index not in index_mapping:
+                omitted_expressions += 1
+                continue
+            property_path = f"Constraints[{index_mapping[old_index]}]"
+        elif property_path.startswith("Constraints."):
+            if property_path.removeprefix("Constraints.") not in kept_names:
+                omitted_expressions += 1
+                continue
+        expressions.append(
+            {"property": property_path, "expression": expression_text}
+        )
+
+    omitted_constraints = len(original_constraints) - len(kept_constraints)
+    warnings: list[str] = []
+    if object_record.get("support") or object_record.get("attachment_support"):
+        warnings.append(
+            "Original support was not restored; the recovered sketch is detached."
+        )
+    if object_record.get("external_geometry"):
+        warnings.append("Recorded external geometry was not restored in detached mode.")
+    if omitted_constraints:
+        warnings.append(
+            f"{omitted_constraints} external-reference constraint(s) were omitted."
+        )
+    if omitted_expressions:
+        warnings.append(
+            f"{omitted_expressions} dependent expression(s) were omitted."
+        )
+    normalized_object = dict(object_record)
+    normalized_object["constraints"] = kept_constraints
+    normalized_object["constraint_count"] = len(kept_constraints)
+    normalized_object["expressions"] = expressions
+    return normalized_object, tuple(warnings)
 
 
 def _unique_internal_name(document: Any, original_name: str) -> str:
@@ -614,7 +700,10 @@ def _validate_reference_policy(
     restore_external_geometry: bool,
     reference_validator: ReferenceValidator | None,
 ) -> None:
-    if restore_attachment and object_record.get("support") and reference_validator is None:
+    support_records = object_record.get("support") or object_record.get(
+        "attachment_support"
+    )
+    if restore_attachment and support_records and reference_validator is None:
         raise SketchReconstructionError("attachment validation is required")
     if (
         restore_external_geometry
@@ -632,16 +721,22 @@ def _validate_reference_policy(
 
 def _constraints_use_external_geometry(constraints: list[Any]) -> bool:
     for constraint in constraints:
-        if not isinstance(constraint, Mapping):
-            continue
-        arguments = constraint.get("arguments")
-        if not isinstance(arguments, Mapping):
-            continue
-        for key in ("first", "second", "third"):
-            value = arguments.get(key)
-            if isinstance(value, int) and _UNUSED_GEOMETRY < value <= -3:
-                return True
+        if isinstance(constraint, Mapping) and _constraint_uses_external_geometry(
+            constraint
+        ):
+            return True
     return False
+
+
+def _constraint_uses_external_geometry(constraint: Mapping[str, Any]) -> bool:
+    arguments = constraint.get("arguments")
+    if not isinstance(arguments, Mapping):
+        return False
+    return any(
+        isinstance(arguments.get(key), int)
+        and _UNUSED_GEOMETRY < arguments[key] <= -3
+        for key in ("first", "second", "third")
+    )
 
 
 def _restore_external_geometry(
@@ -666,7 +761,12 @@ def _restore_attachment_state(
     reference_validator: ReferenceValidator | None,
     warnings: list[str],
 ) -> None:
-    support_records = object_record.get("support", [])
+    legacy_support_records = object_record.get("support", [])
+    attachment_support_records = object_record.get("attachment_support", [])
+    prefer_attachment_support = bool(
+        attachment_support_records and not legacy_support_records
+    )
+    support_records = legacy_support_records or attachment_support_records
     map_mode = object_record.get("map_mode")
     if support_records and not restore_attachment:
         warnings.append("Recorded attachment was not restored without validation.")
@@ -677,10 +777,14 @@ def _restore_attachment_state(
             reference_validator,
         )
         support_value = [
-            (linked_object, tuple(subelements))
+            (linked_object, tuple(subelements or [""]))
             for linked_object, subelements in resolved
         ]
-        sketch.Support = support_value[0] if len(support_value) == 1 else support_value
+        _assign_attachment_support(
+            sketch,
+            support_value,
+            prefer_attachment_support=prefer_attachment_support,
+        )
         if isinstance(map_mode, str) and map_mode:
             sketch.MapMode = map_mode
         offset = object_record.get("attachment_offset")
@@ -690,6 +794,37 @@ def _restore_attachment_state(
 
     if isinstance(map_mode, str) and map_mode in {"Deactivated", "DeactivatedMode"}:
         sketch.MapMode = map_mode
+
+
+def _assign_attachment_support(
+    sketch: Any,
+    support_value: list[tuple[Any, tuple[str, ...]]],
+    *,
+    prefer_attachment_support: bool,
+) -> None:
+    """Write the attachment property exposed by this FreeCAD generation."""
+
+    property_names = (
+        ("AttachmentSupport", "Support")
+        if prefer_attachment_support
+        else ("Support", "AttachmentSupport")
+    )
+    assigned_value: object = (
+        support_value[0] if len(support_value) == 1 else support_value
+    )
+    for property_name in property_names:
+        try:
+            getattr(sketch, property_name)
+        except (AttributeError, ReferenceError):
+            continue
+        try:
+            setattr(sketch, property_name, assigned_value)
+        except AttributeError:
+            continue
+        return
+    raise SketchReconstructionError(
+        "restored sketch does not expose a supported attachment property"
+    )
 
 
 def _restore_visibility(

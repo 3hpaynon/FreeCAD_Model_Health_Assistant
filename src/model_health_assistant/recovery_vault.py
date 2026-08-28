@@ -10,8 +10,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from copy import deepcopy
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +25,23 @@ RECOVERY_INDEX_FILENAME = "index.json"
 RECOVERY_SNAPSHOT_DIRECTORY_NAME = "snapshots"
 RECOVERY_RECORD_STATUSES = frozenset(
     {"active", "deleted", "restored", "unsupported", "partial"}
+)
+RECOVERY_ELIGIBILITY_VALUES = frozenset(
+    {
+        "unassessed",
+        "available",
+        "available_with_warning",
+        "partial",
+        "unavailable",
+    }
+)
+RECOVERY_SUPPORT_STATUSES = frozenset(
+    {
+        "unknown",
+        "not_applicable",
+        "recorded_unresolved",
+        "external_references_unresolved",
+    }
 )
 
 Clock = Callable[[], datetime]
@@ -104,6 +121,12 @@ class RecoveryIndexEntry:
     latest_snapshot_id: str
     snapshot_ids: tuple[str, ...]
     deleted_at: str | None = None
+    recovery_eligibility: str = "unassessed"
+    support_status: str = "unknown"
+    unsupported_elements: tuple[str, ...] = ()
+    recovery_warnings: tuple[str, ...] = ()
+    last_restored_at: str | None = None
+    restored_object_names: tuple[str, ...] = ()
     schema_version: str = RECOVERY_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -128,14 +151,39 @@ class RecoveryIndexEntry:
             raise TypeError("object_label must be text")
         if self.status not in RECOVERY_RECORD_STATUSES:
             raise ValueError("unsupported recovery status")
+        if self.recovery_eligibility not in RECOVERY_ELIGIBILITY_VALUES:
+            raise ValueError("unsupported recovery eligibility")
+        if self.support_status not in RECOVERY_SUPPORT_STATUSES:
+            raise ValueError("unsupported recovery support status")
+        for field_name, values in (
+            ("unsupported_elements", self.unsupported_elements),
+            ("recovery_warnings", self.recovery_warnings),
+            ("restored_object_names", self.restored_object_names),
+        ):
+            if not isinstance(values, tuple) or not all(
+                isinstance(value, str) and value.strip() for value in values
+            ):
+                raise ValueError(f"{field_name} must contain non-empty text")
         if self.deleted_at is not None and (
             not isinstance(self.deleted_at, str) or not self.deleted_at.strip()
         ):
             raise ValueError("deleted_at must be non-empty text or None")
+        if self.last_restored_at is not None and (
+            not isinstance(self.last_restored_at, str)
+            or not self.last_restored_at.strip()
+        ):
+            raise ValueError("last_restored_at must be non-empty text or None")
+        if self.status == "restored" and self.last_restored_at is None:
+            raise ValueError("restored status requires last_restored_at")
+        if self.last_restored_at is not None and not self.restored_object_names:
+            raise ValueError("last_restored_at requires at least one restored object")
 
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
         payload["snapshot_ids"] = list(self.snapshot_ids)
+        payload["unsupported_elements"] = list(self.unsupported_elements)
+        payload["recovery_warnings"] = list(self.recovery_warnings)
+        payload["restored_object_names"] = list(self.restored_object_names)
         return payload
 
     @classmethod
@@ -143,6 +191,13 @@ class RecoveryIndexEntry:
         try:
             snapshot_ids = payload["snapshot_ids"]
             if not isinstance(snapshot_ids, list):
+                raise TypeError
+            unsupported_elements = payload.get("unsupported_elements", [])
+            recovery_warnings = payload.get("recovery_warnings", [])
+            restored_object_names = payload.get("restored_object_names", [])
+            if not isinstance(unsupported_elements, list) or not isinstance(
+                recovery_warnings, list
+            ) or not isinstance(restored_object_names, list):
                 raise TypeError
             return cls(
                 schema_version=str(payload["schema_version"]),
@@ -160,6 +215,22 @@ class RecoveryIndexEntry:
                     if payload.get("deleted_at") is None
                     else str(payload["deleted_at"])
                 ),
+                recovery_eligibility=str(
+                    payload.get("recovery_eligibility", "unassessed")
+                ),
+                support_status=str(payload.get("support_status", "unknown")),
+                unsupported_elements=tuple(
+                    str(value) for value in unsupported_elements
+                ),
+                recovery_warnings=tuple(str(value) for value in recovery_warnings),
+                last_restored_at=(
+                    None
+                    if payload.get("last_restored_at") is None
+                    else str(payload["last_restored_at"])
+                ),
+                restored_object_names=tuple(
+                    str(value) for value in restored_object_names
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise RecoveryVaultCorruptionError(
@@ -174,6 +245,10 @@ class RecoveryIndexEntry:
         status: str | None = None,
         deleted_at: str | None = None,
         object_label: str | None = None,
+        recovery_eligibility: str | None = None,
+        support_status: str | None = None,
+        unsupported_elements: tuple[str, ...] | None = None,
+        recovery_warnings: tuple[str, ...] | None = None,
     ) -> RecoveryIndexEntry:
         """Return an updated immutable entry for a new snapshot."""
 
@@ -186,8 +261,74 @@ class RecoveryIndexEntry:
             captured_at=captured_at,
             status=self.status if status is None else status,
             deleted_at=deleted_at,
+            recovery_eligibility=(
+                self.recovery_eligibility
+                if recovery_eligibility is None
+                else recovery_eligibility
+            ),
+            support_status=(
+                self.support_status if support_status is None else support_status
+            ),
+            unsupported_elements=(
+                self.unsupported_elements
+                if unsupported_elements is None
+                else unsupported_elements
+            ),
+            recovery_warnings=(
+                self.recovery_warnings
+                if recovery_warnings is None
+                else recovery_warnings
+            ),
             latest_snapshot_id=snapshot_id,
             snapshot_ids=(*self.snapshot_ids, snapshot_id),
+        )
+
+    def with_lifecycle(
+        self,
+        *,
+        status: str,
+        deleted_at: str,
+        recovery_eligibility: str,
+        support_status: str,
+        unsupported_elements: tuple[str, ...] = (),
+        recovery_warnings: tuple[str, ...] = (),
+    ) -> RecoveryIndexEntry:
+        """Return an entry transition that does not create a new snapshot."""
+
+        return replace(
+            self,
+            status=status,
+            deleted_at=deleted_at,
+            recovery_eligibility=recovery_eligibility,
+            support_status=support_status,
+            unsupported_elements=unsupported_elements,
+            recovery_warnings=recovery_warnings,
+        )
+
+    def with_restore(
+        self,
+        *,
+        restored_at: str,
+        restored_object_name: str,
+    ) -> RecoveryIndexEntry:
+        """Record one successful restore copy while retaining deletion history."""
+
+        if not isinstance(restored_at, str) or not restored_at.strip():
+            raise ValueError("restored_at must be non-empty text")
+        if not isinstance(restored_object_name, str) or not restored_object_name.strip():
+            raise ValueError("restored_object_name must be non-empty text")
+        if self.deleted_at is None:
+            raise ValueError("only deleted recovery entries can be restored")
+        if restored_object_name in self.restored_object_names:
+            raise ValueError("restored_object_name must identify a new copy")
+        return replace(
+            self,
+            status="restored",
+            last_restored_at=restored_at,
+            restored_object_names=(
+                *self.restored_object_names,
+                restored_object_name,
+            ),
         )
 
 
@@ -371,6 +512,10 @@ class RecoveryVault:
         type_id: str,
         status: str = "active",
         captured_at: str | None = None,
+        recovery_eligibility: str = "unassessed",
+        support_status: str = "unknown",
+        unsupported_elements: tuple[str, ...] = (),
+        recovery_warnings: tuple[str, ...] = (),
     ) -> RecoveryIndexEntry:
         timestamp = captured_at or self._timestamp()
         return RecoveryIndexEntry(
@@ -383,6 +528,10 @@ class RecoveryVault:
             status=status,
             latest_snapshot_id=snapshot_id,
             snapshot_ids=(snapshot_id,),
+            recovery_eligibility=recovery_eligibility,
+            support_status=support_status,
+            unsupported_elements=unsupported_elements,
+            recovery_warnings=recovery_warnings,
         )
 
     def store_snapshot(
@@ -421,6 +570,55 @@ class RecoveryVault:
             backup_payload=previous_index,
         )
         return snapshot_path
+
+    def update_index_entry(self, entry: RecoveryIndexEntry) -> bool:
+        """Atomically replace existing lifecycle metadata without a snapshot."""
+
+        if not isinstance(entry, RecoveryIndexEntry):
+            raise TypeError("entry must be a RecoveryIndexEntry")
+        self.load_snapshot(entry.document_id, entry.latest_snapshot_id)
+        index = self.load_index(entry.document_id)
+        previous_index = deepcopy(index)
+        found = False
+        changed = False
+        replacement = entry.to_dict()
+        updated_entries: list[dict[str, object]] = []
+        for current in index["entries"]:
+            if current.get("object_id") == entry.object_id:
+                found = True
+                current_entry = RecoveryIndexEntry.from_mapping(current)
+                if _snapshot_identity_fields(current_entry) != _snapshot_identity_fields(
+                    entry
+                ):
+                    raise RecoveryVaultStorageError(
+                        "A lifecycle update cannot replace snapshot identity or history."
+                    )
+                changed = current != replacement
+                updated_entries.append(replacement)
+            else:
+                updated_entries.append(current)
+        if not found:
+            raise RecoveryVaultStorageError(
+                "The recovery object does not exist in its document index."
+            )
+        if not changed:
+            return False
+        index["entries"] = updated_entries
+        _atomic_write_json(
+            self.index_path(entry.document_id),
+            index,
+            backup_payload=previous_index,
+        )
+        return True
+
+    def list_document_ids(self) -> tuple[str, ...]:
+        """Return externally registered document UUIDs in deterministic order."""
+
+        self.initialize()
+        registry = self._load_document_registry()
+        return tuple(
+            sorted(str(record["document_id"]) for record in registry["documents"])
+        )
 
     def load_index(self, document_id: str) -> dict[str, Any]:
         """Load a validated index, falling back to its last valid backup."""
@@ -499,6 +697,20 @@ def _validated_index(payload: object, document_id: str) -> dict[str, Any]:
     validated = [RecoveryIndexEntry.from_mapping(item) for item in entries]
     payload["entries"] = [entry.to_dict() for entry in validated]
     return payload
+
+
+def _snapshot_identity_fields(entry: RecoveryIndexEntry) -> tuple[object, ...]:
+    return (
+        entry.schema_version,
+        entry.document_id,
+        entry.object_id,
+        entry.object_name,
+        entry.object_label,
+        entry.type_id,
+        entry.captured_at,
+        entry.latest_snapshot_id,
+        entry.snapshot_ids,
+    )
 
 
 def _validated_document_registry(payload: object) -> dict[str, Any]:

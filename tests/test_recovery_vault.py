@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -254,6 +255,30 @@ def test_store_snapshot_writes_utf8_independent_snapshot_and_index(
     assert index["schema_version"] == "1.0"
     assert index["document_id"] == document_id
     assert index["entries"] == [entry.to_dict()]
+
+
+def test_lifecycle_update_cannot_replace_snapshot_identity_or_history(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    document_id = vault.resolve_document_id(
+        RecoveryDocumentLocator(
+            internal_name="LifecycleDocument",
+            label="Lifecycle document",
+            session_id="lifecycle-session",
+            instance_id="lifecycle-instance",
+        )
+    )
+    entry, _snapshot_path = _store_one(vault, document_id)
+    altered_identity = replace(
+        entry,
+        object_label="Unexpected replacement label",
+    )
+
+    with pytest.raises(RecoveryVaultStorageError, match="snapshot identity"):
+        vault.update_index_entry(altered_identity)
+
+    assert vault.load_index(document_id)["entries"] == [entry.to_dict()]
 
 
 def test_duplicate_labels_are_separate_recovery_objects(tmp_path: Path) -> None:

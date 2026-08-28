@@ -482,13 +482,13 @@ def _looks_like_link_sub_pair(value: Any) -> bool:
     )
 
 
-def _linked_object_descriptor(value: Any) -> dict[str, str | None] | None:
+def _linked_object_descriptor(value: Any) -> dict[str, Any] | None:
     name = _safe_attribute(value, "Name")
     if not isinstance(name, str) or not name.strip():
         return None
     document = _safe_attribute(value, "Document")
     document_name = _safe_attribute(document, "Name")
-    return {
+    descriptor: dict[str, Any] = {
         "name": name,
         "label": _optional_text_attribute(value, "Label"),
         "type_id": _optional_text_attribute(value, "TypeId"),
@@ -498,6 +498,13 @@ def _linked_object_descriptor(value: Any) -> dict[str, str | None] | None:
             else None
         ),
     }
+    placement = _safe_attribute(value, "Placement")
+    if placement is not _MISSING and placement is not None:
+        try:
+            descriptor["placement"] = _placement(placement)
+        except (SketchSerializationError, TypeError, ValueError):
+            pass
+    return descriptor
 
 
 def _subelement_names(value: Any) -> list[str] | None:
@@ -507,7 +514,7 @@ def _subelement_names(value: Any) -> list[str] | None:
         return [value] if value else []
     if isinstance(value, Sequence) and not isinstance(value, bytes):
         if all(isinstance(item, str) for item in value):
-            return list(value)
+            return [item for item in value if item]
     return None
 
 

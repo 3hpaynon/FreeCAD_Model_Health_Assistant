@@ -7,6 +7,9 @@ from model_health_assistant.sketch_restore import (
     restore_sketch_as_copy,
 )
 from model_health_assistant.sketch_snapshot import serialize_sketch
+from model_health_assistant.support_validation import (
+    support_reference_is_restorable,
+)
 
 
 class Vector:
@@ -196,6 +199,7 @@ class Feature:
         self.Label = label or name
         self.TypeId = type_id
         self.Document = None
+        self.Placement = Placement()
 
 
 class Document:
@@ -254,6 +258,21 @@ class InvalidatingAbortDocument(Document):
         super().abortTransaction()
         if created is not None:
             created._deleted = True
+
+
+class AttachmentSupportOnlySketch(Sketch):
+    def __init__(self, name="Sketch003", label="Recovery source") -> None:
+        super().__init__(name=name, label=label)
+        del self.Support
+
+
+class AttachmentSupportOnlyDocument(Document):
+    def addObject(self, type_id, name):
+        if type_id != "Sketcher::SketchObject":
+            raise ValueError("unexpected type")
+        sketch = AttachmentSupportOnlySketch(name=name, label=name)
+        self.Objects.append(sketch)
+        return sketch
 
 
 APP = SimpleNamespace(Vector=Vector, Rotation=Rotation, Placement=Placement)
@@ -468,6 +487,90 @@ def test_attachment_restores_only_after_reference_validator_accepts_it() -> None
     assert result.success is True
     assert result.restored_object.Support == (live_support, ("Face4",))
     assert result.restored_object.MapMode == "FlatFace"
+
+
+def test_stable_datum_plane_support_restores_with_whole_object_sentinel() -> None:
+    source = _source_sketch()
+    support = Feature("DatumPlane", type_id="PartDesign::Plane")
+    support.Document = SimpleNamespace(Name="TargetDocument")
+    source.Support = (support, ("",))
+    source.MapMode = "ObjectXY"
+    snapshot = _snapshot(source)
+    document = Document()
+    live_support = Feature("DatumPlane", type_id="PartDesign::Plane")
+    document.Objects.append(live_support)
+
+    result = _restore(
+        document,
+        snapshot,
+        restore_attachment=True,
+        reference_validator=support_reference_is_restorable,
+    )
+
+    assert result.success is True
+    assert result.restored_object.Support == (live_support, ("",))
+    assert result.restored_object.MapMode == "ObjectXY"
+
+
+def test_attachment_support_restores_when_native_sketch_has_no_support_property() -> None:
+    source = _source_sketch()
+    del source.Support
+    support = Feature("DatumPlane", type_id="PartDesign::Plane")
+    support.Document = SimpleNamespace(Name="TargetDocument")
+    source.AttachmentSupport = (support, ("",))
+    source.MapMode = "ObjectXY"
+    snapshot = _snapshot(source)
+    document = AttachmentSupportOnlyDocument()
+    live_support = Feature("DatumPlane", type_id="PartDesign::Plane")
+    document.Objects.append(live_support)
+
+    result = _restore(
+        document,
+        snapshot,
+        restore_attachment=True,
+        reference_validator=support_reference_is_restorable,
+    )
+
+    assert result.success is True
+    assert result.restored_object.AttachmentSupport == (live_support, ("",))
+    assert result.restored_object.MapMode == "ObjectXY"
+
+
+def test_detached_restore_omits_only_external_dependent_constraint() -> None:
+    source = _source_sketch()
+    support = Feature("Pad")
+    support.Document = SimpleNamespace(Name="TargetDocument")
+    source.Support = (support, ("Face4",))
+    snapshot = _snapshot(source)
+    snapshot["object"]["constraints"][0]["arguments"]["first"] = -3
+    snapshot["object"]["external_geometry"] = [
+        {
+            "object": {
+                "name": "Pad",
+                "label": "Pad",
+                "type_id": "PartDesign::Feature",
+                "document_name": "TargetDocument",
+            },
+            "subelements": ["Edge7"],
+        }
+    ]
+
+    document = Document()
+    result = _restore(
+        document,
+        snapshot,
+        detach_unsafe_references=True,
+    )
+
+    assert result.success is True
+    assert result.restored_object.Support is None
+    assert len(result.restored_object.Constraints) == 3
+    assert result.restored_object.ExpressionEngine == [
+        ("Constraints[2]", "Spreadsheet.Radius")
+    ]
+    assert "Original support was not restored" in " ".join(result.warnings)
+    assert "1 external-reference constraint(s) were omitted." in result.warnings
+    assert [event[0] for event in document.transactions] == ["open", "commit"]
 
 
 def test_external_constraint_requires_validated_external_geometry() -> None:

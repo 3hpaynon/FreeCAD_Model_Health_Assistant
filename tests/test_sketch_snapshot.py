@@ -371,6 +371,27 @@ def test_support_and_external_geometry_are_structured_conservatively() -> None:
     assert serialized["map_mode"] == "FlatFace"
 
 
+def test_datum_support_records_placement_and_normalizes_whole_object_link() -> None:
+    document = SimpleNamespace(Name="Assembly")
+    support = SimpleNamespace(
+        Name="DatumPlane",
+        Label="Datum Plane",
+        TypeId="PartDesign::Plane",
+        Document=document,
+        Placement=Placement((1, 2, 3), (0, 0, 0, 1)),
+    )
+    sketch = Sketch()
+    sketch.Support = (support, ("",))
+
+    reference = _serialize(sketch)["object"]["support"][0]
+
+    assert reference["subelements"] == []
+    assert reference["object"]["placement"] == {
+        "base": {"x": 1.0, "y": 2.0, "z": 3.0},
+        "rotation": {"quaternion": [0.0, 0.0, 0.0, 1.0]},
+    }
+
+
 def test_unsupported_geometry_is_recorded_and_restore_is_conservative() -> None:
     snapshot = _serialize(Sketch([Ellipse()]))
 

@@ -2,9 +2,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from model_health_assistant import recovery_observer
+from model_health_assistant.recovery_lifecycle import RecoveryLifecycleService
 from model_health_assistant.recovery_observer import (
     SketchRecoveryObserver,
     ensure_recovery_observer_registered,
+    registered_recovery_observer,
     shutdown_recovery_observer,
 )
 from model_health_assistant.recovery_vault import RecoveryVault
@@ -116,7 +118,14 @@ class ManualScheduler:
         return 0
 
 
-def _observer(tmp_path: Path, app: App, *, scheduler=None, serializer=serialize_sketch):
+def _observer(
+    tmp_path: Path,
+    app: App,
+    *,
+    scheduler=None,
+    serializer=serialize_sketch,
+    lifecycle_service=None,
+):
     return SketchRecoveryObserver(
         app,
         RecoveryVault(tmp_path / "vault"),
@@ -124,6 +133,7 @@ def _observer(tmp_path: Path, app: App, *, scheduler=None, serializer=serialize_
         serializer=serializer,
         session_id="test-session",
         timestamp_factory=lambda: "2026-08-25T12:00:00+00:00",
+        lifecycle_service=lifecycle_service,
     )
 
 
@@ -143,6 +153,7 @@ def test_start_tracks_existing_supported_sketches_only(tmp_path: Path) -> None:
     observer.start()
 
     assert observer.tracked_sketch_count == 1
+    assert observer.document_id_for(document) == observer._document_ids[id(document)]
     entries = _index(observer, document)["entries"]
     assert len(entries) == 1
     assert entries[0]["object_label"] == "Existing sketch"
@@ -161,6 +172,30 @@ def test_created_sketch_gets_an_immediate_baseline(tmp_path: Path) -> None:
 
     assert observer.tracked_sketch_count == 1
     assert len(_index(observer, document)["entries"]) == 1
+
+
+def test_restore_transaction_callbacks_are_suspended_until_final_capture(
+    tmp_path: Path,
+) -> None:
+    app = App(tmp_path / "user")
+    document = Document("Assembly")
+    app.documents[document.Name] = document
+    observer = _observer(tmp_path, app)
+    observer.start()
+    restored = document.add(Sketch(name="RecoveredSketch", label="Recovered"))
+
+    with observer.suspend_object_tracking():
+        observer.slotCreatedObject(restored)
+        observer.slotChangedObject(restored, "Geometry")
+        observer.slotRecomputedObject(restored)
+        assert observer.capture_restored_sketch(restored) is False
+
+    assert observer.tracked_sketch_count == 0
+    assert observer.capture_restored_sketch(restored) is True
+    assert observer.tracked_sketch_count == 1
+    entries = _index(observer, document)["entries"]
+    assert len(entries) == 1
+    assert entries[0]["object_name"] == "RecoveredSketch"
 
 
 def test_repeated_changes_debounce_and_identical_states_are_not_stored(
@@ -243,7 +278,10 @@ def test_deletion_uses_cached_state_without_serializing_destroyed_object(
     assert pending[0].object_label == "Last stable label"
     assert pending[0].snapshot["object"]["label"] == "Last stable label"
     index_entry = observer.vault.load_index(pending[0].document_id)["entries"][0]
-    assert index_entry["status"] == "active"
+    assert index_entry["status"] == "deleted"
+    assert index_entry["deleted_at"] == "2026-08-25T12:00:00+00:00"
+    assert index_entry["recovery_eligibility"] == "available"
+    assert observer.deletion_persistence_errors() == {}
 
 
 def test_document_close_releases_live_and_pending_state(tmp_path: Path) -> None:
@@ -257,12 +295,65 @@ def test_document_close_releases_live_and_pending_state(tmp_path: Path) -> None:
     document.Objects.remove(sketch)
     observer.slotDeletedObject(sketch)
     assert observer.pending_deletions()
+    document_id = observer.pending_deletions()[0].document_id
+    object_id = observer.pending_deletions()[0].object_id
 
     observer.slotDeletedDocument(document)
 
     assert observer.tracked_sketch_count == 0
     assert observer.pending_deletions() == ()
     assert scheduler.callback is None
+    reopened = RecoveryLifecycleService(
+        RecoveryVault(tmp_path / "vault")
+    ).list_deleted_records(document_id)
+    assert len(reopened) == 1
+    assert reopened[0].object_id == object_id
+
+
+def test_failed_deletion_persistence_is_retained_for_idempotent_retry(
+    tmp_path: Path,
+) -> None:
+    app = App(tmp_path / "user")
+    document = Document("Assembly")
+    sketch = document.add(Sketch())
+    app.documents[document.Name] = document
+    vault = RecoveryVault(tmp_path / "vault")
+    durable_service = RecoveryLifecycleService(vault)
+
+    class FailOnceService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def record_deletion(self, candidate):
+            self.calls += 1
+            if self.calls == 1:
+                raise OSError("simulated transient write failure")
+            return durable_service.record_deletion(candidate)
+
+    lifecycle_service = FailOnceService()
+    observer = SketchRecoveryObserver(
+        app,
+        vault,
+        serializer=serialize_sketch,
+        session_id="test-session",
+        timestamp_factory=lambda: "2026-08-25T12:00:00+00:00",
+        lifecycle_service=lifecycle_service,
+    )
+    observer.start()
+    document.Objects.remove(sketch)
+
+    observer.slotDeletedObject(sketch)
+
+    pending = observer.pending_deletions()
+    assert len(pending) == 1
+    assert observer.deletion_persistence_errors() == {
+        (pending[0].document_id, pending[0].object_id): "OSError"
+    }
+    assert vault.load_index(pending[0].document_id)["entries"][0]["status"] == "active"
+
+    assert observer.persist_pending_deletions() == 1
+    assert observer.deletion_persistence_errors() == {}
+    assert vault.load_index(pending[0].document_id)["entries"][0]["status"] == "deleted"
 
 
 def test_multiple_documents_keep_separate_identity_and_state(tmp_path: Path) -> None:
@@ -309,6 +400,7 @@ def test_duplicate_registration_returns_same_observer_and_removes_once(
         assert first.is_registered is True
         assert app.add_calls == 1
         assert len(app.observers) == 1
+        assert registered_recovery_observer(app) is first
     finally:
         removed = shutdown_recovery_observer()
 
