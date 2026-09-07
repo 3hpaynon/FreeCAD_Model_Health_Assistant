@@ -246,22 +246,54 @@ class RecoveryRestoreService:
                 error_stage="assessment",
             )
 
-        snapshot = self.vault.load_snapshot(document_id, assessment.snapshot_id)
+        try:
+            snapshot = self.vault.load_snapshot(
+                document_id,
+                assessment.snapshot_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - return a controlled service result.
+            return _service_failure(
+                mode,
+                "restore_snapshot_unavailable",
+                "The deleted sketch snapshot could not be read safely.",
+                exc,
+                stage="snapshot",
+            )
+
         restore_attachment = mode == RESTORE_WITH_ORIGINAL_SUPPORT
         validator = support_reference_is_restorable if restore_attachment else None
-        suspension = getattr(self.observer, "suspend_object_tracking", None)
-        tracking_context = suspension() if callable(suspension) else nullcontext()
-        with tracking_context:
-            engine_result = self.restore_engine(
-                document,
-                snapshot,
-                app_module=self.app_module,
-                part_module=self.part_module,
-                sketcher_module=self.sketcher_module,
-                restore_attachment=restore_attachment,
-                restore_external_geometry=False,
-                reference_validator=validator,
-                detach_unsafe_references=mode == RESTORE_DETACHED,
+        try:
+            suspension = getattr(self.observer, "suspend_object_tracking", None)
+            tracking_context = (
+                suspension() if callable(suspension) else nullcontext()
+            )
+            with tracking_context:
+                engine_result = self.restore_engine(
+                    document,
+                    snapshot,
+                    app_module=self.app_module,
+                    part_module=self.part_module,
+                    sketcher_module=self.sketcher_module,
+                    restore_attachment=restore_attachment,
+                    restore_external_geometry=False,
+                    reference_validator=validator,
+                    detach_unsafe_references=mode == RESTORE_DETACHED,
+                )
+        except Exception as exc:  # noqa: BLE001 - contain native wrapper failures.
+            return _service_failure(
+                mode,
+                "restore_engine_failed",
+                "The sketch could not be restored safely.",
+                exc,
+                stage="reconstruction",
+            )
+        if not isinstance(engine_result, SketchRestoreResult):
+            return _service_failure(
+                mode,
+                "restore_engine_result_invalid",
+                "The sketch restoration engine returned an invalid result.",
+                TypeError("restore engine result must be a SketchRestoreResult"),
+                stage="reconstruction",
             )
         if not engine_result.success:
             return RestoreExecutionResult(

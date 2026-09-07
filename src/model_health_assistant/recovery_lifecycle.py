@@ -317,10 +317,25 @@ class RecoveryLifecycleService:
     ) -> DeletedSketchRecord:
         if entry.deleted_at is None:
             raise RecoveryLifecycleError("indexed object is not deleted")
-        active_snapshot = snapshot or self.vault.load_snapshot(
-            entry.document_id,
-            entry.latest_snapshot_id,
-        )
+        snapshot_warning: tuple[str, ...] = ()
+        recovery_eligibility = entry.recovery_eligibility
+        if snapshot is not None:
+            active_snapshot = snapshot
+        else:
+            try:
+                active_snapshot = self.vault.load_snapshot(
+                    entry.document_id,
+                    entry.latest_snapshot_id,
+                )
+            except RecoveryVaultCorruptionError:
+                # One damaged immutable snapshot must not hide the rest of a
+                # valid document index. Keep the entry visible but disable
+                # restoration until the underlying storage is repaired.
+                active_snapshot = {}
+                recovery_eligibility = ELIGIBILITY_UNAVAILABLE
+                snapshot_warning = (
+                    "The latest recovery snapshot could not be read safely.",
+                )
         object_record = active_snapshot.get("object")
         geometry_count = None
         constraint_count = None
@@ -339,10 +354,12 @@ class RecoveryLifecycleService:
             status=entry.status,
             deleted_at=entry.deleted_at,
             latest_snapshot_id=entry.latest_snapshot_id,
-            recovery_eligibility=entry.recovery_eligibility,
+            recovery_eligibility=recovery_eligibility,
             support_status=entry.support_status,
             unsupported_elements=entry.unsupported_elements,
-            warnings=entry.recovery_warnings,
+            warnings=tuple(
+                dict.fromkeys((*entry.recovery_warnings, *snapshot_warning))
+            ),
             geometry_count=geometry_count,
             constraint_count=constraint_count,
             last_restored_at=entry.last_restored_at,

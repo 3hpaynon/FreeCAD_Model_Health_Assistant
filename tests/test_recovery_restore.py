@@ -337,6 +337,57 @@ def test_restore_failure_does_not_mark_vault_as_restored(tmp_path: Path) -> None
     assert persisted["restored_object_names"] == []
 
 
+def test_unexpected_restore_engine_exception_is_contained(tmp_path: Path) -> None:
+    vault = RecoveryVault(tmp_path / "vault")
+    document, entry, _snapshot = _seed_deleted(vault)
+
+    def raising_engine(_document, _snapshot, **_kwargs):
+        raise RuntimeError("simulated native reconstruction exception")
+
+    result = RecoveryRestoreService(
+        vault,
+        restore_engine=raising_engine,
+    ).restore(
+        document,
+        entry.document_id,
+        entry.object_id,
+        mode=RESTORE_DETACHED,
+    )
+
+    assert result.success is False
+    assert result.status_code == "restore_engine_failed"
+    assert result.error_stage == "reconstruction"
+    assert result.error_type == "RuntimeError"
+    persisted = vault.load_index(entry.document_id)["entries"][0]
+    assert persisted["status"] == "deleted"
+
+
+def test_malformed_snapshot_returns_controlled_failure_without_running_engine(
+    tmp_path: Path,
+) -> None:
+    vault = RecoveryVault(tmp_path / "vault")
+    document, entry, _snapshot = _seed_deleted(vault)
+    engine = SuccessfulEngine()
+    vault.snapshot_path(
+        entry.document_id,
+        entry.latest_snapshot_id,
+    ).write_text("not valid JSON", encoding="utf-8")
+
+    result = RecoveryRestoreService(vault, restore_engine=engine).restore(
+        document,
+        entry.document_id,
+        entry.object_id,
+        mode=RESTORE_DETACHED,
+    )
+
+    assert result.success is False
+    assert result.status_code == "restore_assessment_failed"
+    assert result.error_stage == "assessment"
+    assert engine.calls == []
+    persisted = vault.load_index(entry.document_id)["entries"][0]
+    assert persisted["status"] == "deleted"
+
+
 def test_original_support_mode_is_revalidated_before_engine_runs(
     tmp_path: Path,
 ) -> None:

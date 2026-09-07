@@ -181,6 +181,10 @@ class SketchRecoveryObserver:
 
         if self._shutdown:
             return
+        # Capture meaningful edits that have not yet reached the debounce
+        # timer or a document recompute. Failures remain contained by
+        # _capture_state so application shutdown is never interrupted.
+        self.flush_pending()
         self.persist_pending_deletions()
         self._shutdown = True
         self._cancel_scheduler()
@@ -397,6 +401,7 @@ class SketchRecoveryObserver:
                 self._track_object(obj, capture_immediately=True)
 
     def _forget_document(self, document: Any) -> None:
+        self._safe_flush_document(document)
         self.persist_pending_deletions()
         document_key = id(document)
         for runtime_key in list(

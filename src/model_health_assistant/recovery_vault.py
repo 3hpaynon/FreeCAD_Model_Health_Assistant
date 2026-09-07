@@ -390,7 +390,7 @@ class RecoveryVault:
     def initialize(self) -> None:
         """Create the vault and its empty versioned document registry."""
 
-        self.root.mkdir(parents=True, exist_ok=True)
+        _ensure_directory(self.root)
         if not self.document_registry_path.exists():
             _atomic_write_json(
                 self.document_registry_path,
@@ -481,7 +481,7 @@ class RecoveryVault:
 
         _require_uuid(document_id, "document_id")
         document_directory = self.document_directory(document_id)
-        self.snapshot_directory(document_id).mkdir(parents=True, exist_ok=True)
+        _ensure_directory(self.snapshot_directory(document_id))
         index_path = self.index_path(document_id)
         if not index_path.exists():
             _atomic_write_json(index_path, _empty_index(document_id))
@@ -897,7 +897,7 @@ def _atomic_write_json(
 ) -> None:
     """Write UTF-8 JSON through a closed same-directory temporary file."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_directory(path.parent)
     try:
         serialized = json.dumps(
             payload,
@@ -955,6 +955,15 @@ def _read_validated_json_with_backup(
         if not backup.exists():
             raise primary_error
         return validator(_read_json(backup))
+
+
+def _ensure_directory(path: Path) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RecoveryVaultStorageError(
+            f"Recovery storage directory '{path}' is not writable."
+        ) from exc
 
 
 def _read_json(path: Path) -> object:

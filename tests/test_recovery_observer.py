@@ -310,6 +310,53 @@ def test_document_close_releases_live_and_pending_state(tmp_path: Path) -> None:
     assert reopened[0].object_id == object_id
 
 
+def test_document_close_flushes_dirty_sketch_before_releasing_it(
+    tmp_path: Path,
+) -> None:
+    app = App(tmp_path / "user")
+    document = Document("Assembly")
+    sketch = document.add(Sketch())
+    app.documents[document.Name] = document
+    scheduler = ManualScheduler()
+    observer = _observer(tmp_path, app, scheduler=scheduler)
+    observer.start()
+    document_id = observer.document_id_for(document)
+    sketch.Label = "Final unsaved label"
+    observer.slotChangedObject(sketch, "Label")
+
+    observer.slotDeletedDocument(document)
+
+    assert document_id is not None
+    entry = observer.vault.load_index(document_id)["entries"][0]
+    assert entry["object_label"] == "Final unsaved label"
+    assert len(entry["snapshot_ids"]) == 2
+    assert observer.tracked_sketch_count == 0
+    assert scheduler.callback is None
+
+
+def test_observer_shutdown_flushes_dirty_sketch_once(tmp_path: Path) -> None:
+    app = App(tmp_path / "user")
+    document = Document("Assembly")
+    sketch = document.add(Sketch())
+    app.documents[document.Name] = document
+    scheduler = ManualScheduler()
+    observer = _observer(tmp_path, app, scheduler=scheduler)
+    observer.start()
+    document_id = observer.document_id_for(document)
+    sketch.Label = "Dirty at application shutdown"
+    observer.slotChangedObject(sketch, "Label")
+
+    observer.shutdown()
+    observer.shutdown()
+
+    assert document_id is not None
+    entry = observer.vault.load_index(document_id)["entries"][0]
+    assert entry["object_label"] == "Dirty at application shutdown"
+    assert len(entry["snapshot_ids"]) == 2
+    assert observer.tracked_sketch_count == 0
+    assert scheduler.callback is None
+
+
 def test_failed_deletion_persistence_is_retained_for_idempotent_retry(
     tmp_path: Path,
 ) -> None:
@@ -372,6 +419,28 @@ def test_multiple_documents_keep_separate_identity_and_state(tmp_path: Path) -> 
     assert first_id != second_id
     assert len(observer.vault.load_index(first_id)["entries"]) == 1
     assert len(observer.vault.load_index(second_id)["entries"]) == 1
+
+
+def test_observer_preserves_unsaved_document_identity_across_save_as(
+    tmp_path: Path,
+) -> None:
+    app = App(tmp_path / "user")
+    document = Document("Untitled")
+    document.add(Sketch())
+    app.documents[document.Name] = document
+    observer = _observer(tmp_path, app)
+    observer.start()
+    original_id = observer.document_id_for(document)
+    saved_path = tmp_path / "Models With Spaces" / "Mounting ⅛.FCStd"
+    saved_path.parent.mkdir()
+    saved_path.write_bytes(b"FreeCAD test placeholder")
+    document.FileName = str(saved_path)
+
+    observer.slotChangedDocument(document, "FileName")
+
+    assert original_id is not None
+    assert observer.document_id_for(document) == original_id
+    assert observer.vault.list_document_ids() == (original_id,)
 
 
 def test_duplicate_registration_returns_same_observer_and_removes_once(

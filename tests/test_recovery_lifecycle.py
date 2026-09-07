@@ -337,3 +337,32 @@ def test_duplicate_deletion_is_idempotent_and_snapshot_history_survives_restart(
     assert reopened_records[0].object_id == second_entry.object_id
     assert reopened_records[0].object_label == "Latest recoverable sketch"
     assert reopened_records[0].latest_snapshot_id == second_snapshot_id
+
+
+def test_one_corrupt_snapshot_does_not_hide_other_deleted_records(
+    tmp_path: Path,
+) -> None:
+    vault = RecoveryVault(tmp_path / "vault")
+    corrupt_entry, _snapshot = _store_seed(vault)
+    healthy_entry, _snapshot = _store_seed(vault, mutate=_add_supported_content)
+    service = RecoveryLifecycleService(vault)
+    service.record_deletion(_candidate(corrupt_entry))
+    service.record_deletion(_candidate(healthy_entry))
+    vault.snapshot_path(
+        corrupt_entry.document_id,
+        corrupt_entry.latest_snapshot_id,
+    ).write_text("{malformed", encoding="utf-8")
+
+    records = service.list_deleted_records(corrupt_entry.document_id)
+
+    by_id = {record.object_id: record for record in records}
+    assert set(by_id) == {corrupt_entry.object_id, healthy_entry.object_id}
+    corrupt = by_id[corrupt_entry.object_id]
+    healthy = by_id[healthy_entry.object_id]
+    assert corrupt.recovery_eligibility == ELIGIBILITY_UNAVAILABLE
+    assert corrupt.geometry_count is None
+    assert corrupt.constraint_count is None
+    assert "snapshot could not be read safely" in " ".join(corrupt.warnings)
+    assert healthy.recovery_eligibility == ELIGIBILITY_AVAILABLE
+    assert healthy.geometry_count == 1
+    assert len(vault.load_index(corrupt_entry.document_id)["entries"]) == 2

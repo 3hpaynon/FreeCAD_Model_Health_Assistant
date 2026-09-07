@@ -110,6 +110,15 @@ def test_initialize_creates_only_versioned_vault_registry(tmp_path: Path) -> Non
     }
 
 
+def test_unusable_storage_directory_reports_controlled_error(tmp_path: Path) -> None:
+    blocking_file = tmp_path / "not-a-directory"
+    blocking_file.write_text("blocked", encoding="utf-8")
+    vault = RecoveryVault(blocking_file / "recovery")
+
+    with pytest.raises(RecoveryVaultStorageError, match="is not writable"):
+        vault.initialize()
+
+
 def test_saved_document_identity_survives_label_and_internal_name_changes(
     tmp_path: Path,
 ) -> None:
@@ -493,3 +502,62 @@ def test_snapshot_schema_and_identity_must_match_index(tmp_path: Path) -> None:
 
     with pytest.raises(RecoveryVaultCorruptionError):
         vault.store_snapshot(entry, payload)
+
+
+def test_missing_index_reports_controlled_corruption_error(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    document_id = vault.resolve_document_id(
+        RecoveryDocumentLocator(
+            "Doc",
+            "Doc",
+            session_id="session",
+            instance_id="instance",
+        )
+    )
+    vault.index_path(document_id).unlink()
+
+    with pytest.raises(
+        RecoveryVaultCorruptionError,
+        match="could not be read safely",
+    ):
+        vault.load_index(document_id)
+
+
+def test_read_only_storage_failure_preserves_valid_index(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    document_id = vault.resolve_document_id(
+        RecoveryDocumentLocator(
+            "Doc",
+            "Doc",
+            session_id="session",
+            instance_id="instance",
+        )
+    )
+    original_index = vault.load_index(document_id)
+    object_id = vault.new_object_id()
+    snapshot_id = vault.new_snapshot_id()
+    entry = vault.new_index_entry(
+        document_id=document_id,
+        object_id=object_id,
+        snapshot_id=snapshot_id,
+        object_name="Sketch003",
+        object_label="Read-only test",
+        type_id="Sketcher::SketchObject",
+    )
+
+    def deny_temporary_file(*_args, **_kwargs):
+        raise PermissionError("simulated read-only recovery directory")
+
+    monkeypatch.setattr(recovery_vault.tempfile, "mkstemp", deny_temporary_file)
+
+    with pytest.raises(RecoveryVaultStorageError, match="could not be stored"):
+        vault.store_snapshot(
+            entry,
+            _snapshot_payload(document_id, object_id, snapshot_id),
+        )
+
+    assert vault.load_index(document_id) == original_index
+    assert not vault.snapshot_path(document_id, snapshot_id).exists()

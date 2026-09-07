@@ -449,6 +449,18 @@ def test_unsafe_expression_is_skipped_without_failing_restore() -> None:
     assert "An unsafe or unsupported expression was skipped." in result.warnings
 
 
+def test_empty_sketch_restores_as_an_empty_copy_in_one_transaction() -> None:
+    source = Sketch(label="Empty recovery sketch")
+    document = Document()
+
+    result = _restore(document, _snapshot(source))
+
+    assert result.success is True
+    assert result.restored_object.Geometry == []
+    assert result.restored_object.Constraints == []
+    assert [event[0] for event in document.transactions] == ["open", "commit"]
+
+
 def test_attachment_is_not_restored_without_explicit_validation() -> None:
     source = _source_sketch()
     support = Feature("Pad")
